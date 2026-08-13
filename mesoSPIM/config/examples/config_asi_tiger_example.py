@@ -8,6 +8,13 @@ mesoSPIM config file -- copy the pieces below into your existing config
 which is exactly how demo_config.py and the other example configs in
 this folder are meant to be used.
 
+Card specs, ranges, and safety limits below are taken directly from
+ASI's own confirmation email about this specific rack's build (firmware
+v3.60 SIGNAL_DAC_4CH), not guessed -- see PATCHNOTES_ASI_TIGER.md,
+"ASI-confirmed hardware facts" for the full email content. Re-verify
+against your own rack's actual card addresses with the 'N' command
+before trusting these numbers (see tools/asi_tiger_hardware_test.py).
+
 See tools/asi_tiger_hardware_test.py to verify your DAC channels and
 PLC wiring against this same channel layout BEFORE using it here.
 """
@@ -18,9 +25,7 @@ waveformgeneration = 'ASI_Tiger'
 
 # Read by mesoSPIM_ASITigerWaveFormGenerator.config_check() / create_tasks().
 # Mirrors the shape of 'acquisition_hardware' but for ASI Tiger cards
-# instead of NI channel strings. Card addresses/axes below match the
-# example 7-card rack this was developed against -- adjust to yours
-# (confirm with the Tiger 'N' command, see tools/asi_tiger_hardware_test.py).
+# instead of NI channel strings.
 asi_dac_parameters = {
     # Serial connection to the Tiger rack. If this matches the ASI stage's
     # COMport in asi_parameters below, the DAC/PLC backend automatically
@@ -29,28 +34,70 @@ asi_dac_parameters = {
     'port': 'COM5',
     'baudrate': 115200,
 
+    # ------------------------------------------------------------------
     # Galvo + ETL channels, in the order [galvo_l, galvo_r, etl_l, etl_r]
     # -- must match bundle_galvo_and_etl_waveforms() in
     # mesoSPIM_WaveFormGenerator.py.
     #
-    # BANDWIDTH CAVEAT (see PATCHNOTES_ASI_TIGER.md): these are the
-    # channels most affected by ASI's lower update rate vs. NI. Validate
-    # scan quality on your actual optics before relying on this for
-    # production acquisitions.
+    # Card 7 (A/B/C/D): -10.24 to +10.24V, 1.6kHz analog Bessel low-pass
+    #   filter, intended for galvo control. Axes B and D are ASI's
+    #   guaranteed-fastest-response channels on this card (a few hundred
+    #   microseconds less delay than A/C) -- use them for the actual scan
+    #   axes, which is why galvo_l/galvo_r map to B/D below, not A/C.
+    #   SAFETY (ASI, verbatim): "Limit command voltage to + and - 10000
+    #   (+-10v) to guarantee galvo amplifier safety." range_code=6 alone
+    #   allows the full +/-10.24V hardware range -- safety_limit_mv=10000
+    #   below is what actually enforces the tighter +/-10.00V bound; do
+    #   not remove it.
+    #
+    # Card 4 (H/I/J/K): 0 to 4.096V, 400Hz LPF, intended for Tunable Lens
+    #   control (into an EL-E-4 driver). Axes I and K are the
+    #   guaranteed-fastest here, hence etl_l/etl_r map to I/K, not H/J.
+    #
+    # max_step_v on all four: ASI's own warning -- "Sudden jumps in
+    # command voltage that are faster then the inertial moment of the
+    # device can cause damage" to the galvo/lens. The 1.6kHz/400Hz analog
+    # filters smooth normal waveform playback, but a single large jump
+    # (a GUI slider dragged quickly, a bad script) can still exceed what
+    # they can absorb. 0.5V/0.2V are conservative STARTING defaults, not
+    # numbers ASI verified for your specific galvo/lens -- tune down if
+    # you have datasheet numbers for actual safe slew rates, and test
+    # cautiously.
+    #
+    # FIRMWARE NOTE: as shipped, these cards do NOT have GALVO_SPIM
+    # firmware, which is what's needed for the on-card single-axis
+    # waveform generator (asi_tiger/singleaxis.py, SAA/SAF/SAO/SAP/SAM).
+    # Until that's flashed (ask ASI -- see PATCHNOTES_ASI_TIGER.md), only
+    # plain M-command voltage control (manual + WaveformStreamer's
+    # software-timed loop) works on these channels.
     'galvo_etl_channels': [
-        {'name': 'galvo_l', 'card_addr': 37, 'axis': 'A', 'range_code': 4},  # +/-2.048V
-        {'name': 'galvo_r', 'card_addr': 37, 'axis': 'B', 'range_code': 4},
-        {'name': 'etl_l',   'card_addr': 37, 'axis': 'C', 'range_code': 4},
-        {'name': 'etl_r',   'card_addr': 37, 'axis': 'D', 'range_code': 4},
+        {'name': 'galvo_l', 'card_addr': 37, 'axis': 'B', 'range_code': 6,
+         'safety_limit_mv': 10000, 'max_step_v': 0.5},
+        {'name': 'galvo_r', 'card_addr': 37, 'axis': 'D', 'range_code': 6,
+         'safety_limit_mv': 10000, 'max_step_v': 0.5},
+        {'name': 'etl_l',   'card_addr': 34, 'axis': 'I', 'range_code': 1,
+         'max_step_v': 0.2},
+        {'name': 'etl_r',   'card_addr': 34, 'axis': 'K', 'range_code': 1,
+         'max_step_v': 0.2},
     ],
 
+    # ------------------------------------------------------------------
     # Laser modulation channels, in the SAME increasing-wavelength order
     # as laserdict (same requirement the NI 'laser_task_line' has).
+    #
+    # Card 5 (P/Q/R/S): 0 to 4.096V, 400Hz LPF (adjustable via the
+    #   BACKLASH command if you need a different cutoff), intended for
+    #   analog laser intensity control. By the same "2nd/4th channel is
+    #   fastest" pattern ASI described for cards 4 and 7, Q and S are
+    #   likely the fastest pair here too (not explicitly confirmed by
+    #   ASI for this card -- ask if sub-channel timing matters for your
+    #   blanking scheme). All four are listed since most setups need up
+    #   to 4 laser lines; reorder/swap to match your actual laserdict.
     'laser_channels': [
-        {'name': 'laser_405', 'card_addr': 34, 'axis': 'H', 'range_code': 6},
-        {'name': 'laser_488', 'card_addr': 34, 'axis': 'I', 'range_code': 6},
-        {'name': 'laser_561', 'card_addr': 34, 'axis': 'J', 'range_code': 6},
-        {'name': 'laser_638', 'card_addr': 34, 'axis': 'K', 'range_code': 6},
+        {'name': 'laser_405', 'card_addr': 35, 'axis': 'P', 'range_code': 1},
+        {'name': 'laser_488', 'card_addr': 35, 'axis': 'Q', 'range_code': 1},
+        {'name': 'laser_561', 'card_addr': 35, 'axis': 'R', 'range_code': 1},
+        {'name': 'laser_638', 'card_addr': 35, 'axis': 'S', 'range_code': 1},
     ],
 
     # PLC (Programmable Logic Card) address and axis letter.
@@ -66,10 +113,14 @@ asi_dac_parameters = {
     # camera trigger. Leave as None if the camera is triggered some other way.
     'plc_camera_trigger_cell': None,
 
-    # Effective software-timed streaming rate for the DAC (Hz). This is
-    # NOT the NI-equivalent samplerate -- it's a much lower, best-effort
-    # rate for the serial-command loop. Keep well under ~100 Hz. See
-    # PATCHNOTES_ASI_TIGER.md for the full bandwidth comparison.
+    # Effective software-timed streaming rate for the DAC (Hz), used by
+    # WaveformStreamer for anything NOT running through the (not yet
+    # confirmed) on-card single-axis generator. NOT the NI-equivalent
+    # samplerate -- ASI confirmed the digital update ceiling is 4kHz
+    # total across a card's 4 channels (so up to ~1kHz/channel, with the
+    # analog Bessel filters smoothing the resulting steps in hardware),
+    # but the SOFTWARE-timed serial loop here is far below even that --
+    # keep well under ~100 Hz. See PATCHNOTES_ASI_TIGER.md.
     'software_stream_rate_hz': 50,
 }
 

@@ -18,6 +18,7 @@ this script's own location):
     python asi_tiger_hardware_test.py --port COM5 --test-voltage 0.5
     python asi_tiger_hardware_test.py --port COM5 --plc-camera-bnc 1
     python asi_tiger_hardware_test.py --port COM5 --test-laser-toggle --plc-camera-bnc 1 --plc-laser-bncs 5,6
+    python asi_tiger_hardware_test.py --port COM5 --raw          # interactive command probe
 
 What it does, in order:
   1. Connects and asks the controller who it is (raw 'N' command) so you
@@ -218,40 +219,107 @@ def test_plc_laser_toggle(plc: PLCCard, camera_bnc: int, laser_bncs: tuple, seco
     )
     print(f"Configured. Manually pulse BNC{camera_bnc} a few times over the next {seconds:.0f}s "
           f"and confirm BNC{laser_bncs[0]}/BNC{laser_bncs[1]} alternate (scope, LED, or multimeter).")
-    end = time.time() + seconds
-    last = None
-    while time.time() < end:
-        cells = plc.read_cell_outputs()
-        toggle_state = bool(cells & (1 << 0))  # cell 1 = toggle flop, LSB
-        if toggle_state != last:
-            print(f"  toggle flop (cell 1): {'laser1 side' if toggle_state else 'laser0 side'}")
-            last = toggle_state
-        time.sleep(0.1)
-    print("Done. Clearing PLC state.")
+    try:
+        end = time.time() + seconds
+        last = None
+        while time.time() < end:
+            cells = plc.read_cell_outputs()
+            toggle_state = bool(cells & (1 << 0))  # cell 1 = toggle flop, LSB
+            if toggle_state != last:
+                print(f"  toggle flop (cell 1): {'laser1 side' if toggle_state else 'laser0 side'}")
+                last = toggle_state
+            time.sleep(0.1)
+    finally:
+        # IMPORTANT: clear_state() (HOME) does NOT stop this logic -- the
+        # PLC keeps running it in hardware regardless of the host
+        # connection. This has to be an explicit undo, and it has to run
+        # even if the wait loop above is interrupted (Ctrl-C).
+        print(f"Disabling the toggle logic (BNC{laser_bncs[0]}/BNC{laser_bncs[1]} back to inputs)...")
+        plc.disable_two_laser_toggle(laser0_bnc=laser_bncs[0], laser1_bnc=laser_bncs[1])
+        print("Done -- outputs are no longer being driven.")
 
 
-def test_plc(tiger: TigerController, card_addr: int, axis: str, args):
+def safe_call(description: str, fn, *args, **kwargs):
+    """
+    Run a PLC/DAC call that isn't fully hardware-confirmed yet, without
+    letting a wrong guess (wrong syntax, wrong card behavior on your
+    specific firmware) take down the rest of the test run. Prints a clear
+    diagnostic and continues instead of crashing.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except (TigerError, TimeoutError, RuntimeError) as exc:
+        print(f"  WARNING: {description} failed ({exc}). Continuing with the rest of the "
+              f"test -- see --raw mode (run this script with --raw) to probe the correct "
+              f"syntax interactively against your controller.")
+        return None
+
+
+def test_plc(tiger: TigerController, card_addr: int, axis: str, args) -> PLCCard:
     section("3. PLC (Programmable Logic Card)")
     plc = PLCCard(tiger, card_addr=card_addr, axis=axis)
     print(f"Using PLC at card address {card_addr}, axis {axis}.")
-    print("Clearing all flip-flop/one-shot/delay state first (HOME)...")
-    plc.clear_state()
+    print("Clearing stateful-cell bit state (HOME)... (does NOT stop live logic -- see below)")
+    safe_call("clear_state()", plc.clear_state)
 
-    self_test_ok = test_plc_self_test(plc)
+    try:
+        self_test_ok = test_plc_self_test(plc)
 
-    if args.plc_camera_bnc is not None:
-        if prompt_yes_no(f"\nRun a live read on BNC{args.plc_camera_bnc} so you can verify wiring?", default=True):
-            test_plc_bnc_live_read(plc, args.plc_camera_bnc)
+        if args.plc_camera_bnc is not None:
+            if prompt_yes_no(f"\nRun a live read on BNC{args.plc_camera_bnc} so you can verify wiring?", default=True):
+                test_plc_bnc_live_read(plc, args.plc_camera_bnc)
 
-    if args.test_laser_toggle:
-        if args.plc_camera_bnc is None or not args.plc_laser_bncs:
-            print("\n--test-laser-toggle requires --plc-camera-bnc and --plc-laser-bncs -- skipping.")
-        else:
-            test_plc_laser_toggle(plc, args.plc_camera_bnc, args.plc_laser_bncs)
+        if args.test_laser_toggle:
+            if args.plc_camera_bnc is None or not args.plc_laser_bncs:
+                print("\n--test-laser-toggle requires --plc-camera-bnc and --plc-laser-bncs -- skipping.")
+            else:
+                test_plc_laser_toggle(plc, args.plc_camera_bnc, args.plc_laser_bncs)
+    finally:
+        # This is the step that actually stops any output this session
+        # configured -- clear_state()/HOME does not (see plc.py docstrings).
+        # Runs even if something above raised or was Ctrl-C'd.
+        print("\nSafing all PLC outputs configured this session (back to inputs)...")
+        safe_call("safe_all_outputs()", plc.safe_all_outputs)
+        safe_call("clear_state()", plc.clear_state)
 
-    print("\nResetting PLC to a clean/harmless state...")
-    plc.clear_state()
-    return self_test_ok
+    return plc
+
+
+# ---------------------------------------------------------------------
+def run_raw_console(port: str, baudrate: int):
+    """
+    Interactive raw command console: type a command, see the exact reply
+    (or timeout), no library logic in the way. Use this to figure out the
+    right syntax when something in the library guesses wrong -- much
+    faster than editing code and re-running the whole test each time.
+
+    Examples to try:
+        N                    identify the controller
+        36! E                HOME the PLC axis (with card prefix)
+        ! E                  HOME the PLC axis (no card prefix)
+        36M A=1500            set DAC axis A on card 36 to 1.5V
+        36W A                 read DAC axis A on card 36
+    """
+    section("Raw command console")
+    print("Type a raw command and press Enter to send it. Type 'quit' or Ctrl-C to exit.")
+    tiger = TigerController(port, baudrate=baudrate)
+    tiger.connect()
+    try:
+        while True:
+            cmd = input("\n> ").strip()
+            if cmd.lower() in ("quit", "exit"):
+                break
+            if not cmd:
+                continue
+            try:
+                reply = tiger.send_command(cmd)
+                print(f"  reply: {reply!r}")
+            except (TigerError, TimeoutError, RuntimeError) as exc:
+                print(f"  ERROR: {exc}")
+    except KeyboardInterrupt:
+        print("\nExiting raw console.")
+    finally:
+        tiger.disconnect()
 
 
 # ---------------------------------------------------------------------
@@ -275,13 +343,21 @@ def main():
                          help="Also dry-run the 2-laser toggle logic (drives real BNC outputs -- requires confirmation)")
     parser.add_argument("--plc-laser-bncs", default=None,
                          help="Comma-separated BNC pair for laser toggle test, e.g. 5,6")
+    parser.add_argument("--raw", action="store_true",
+                         help="Skip all tests, just open a connection and drop into an "
+                              "interactive raw-command console for probing syntax directly")
     args = parser.parse_args()
+
+    if args.raw:
+        run_raw_console(args.port, args.baudrate)
+        return
 
     if args.plc_laser_bncs:
         args.plc_laser_bncs = tuple(int(x) for x in args.plc_laser_bncs.split(","))
 
     tiger = None
     dac = None
+    plc = None
     try:
         tiger = test_connection(args.port, args.baudrate)
 
@@ -298,7 +374,7 @@ def main():
             print("\nSkipping DAC test (--skip-dac).")
 
         if not args.skip_plc:
-            test_plc(tiger, args.plc_card_addr, args.plc_axis, args)
+            plc = test_plc(tiger, args.plc_card_addr, args.plc_axis, args)
         else:
             print("\nSkipping PLC test (--skip-plc).")
 
@@ -308,6 +384,14 @@ def main():
     except KeyboardInterrupt:
         print("\n\nInterrupted -- cleaning up safely before exit.")
     finally:
+        if plc is not None:
+            # Belt-and-suspenders: test_plc() already does this in its own
+            # finally block, but this covers the case where something
+            # raised between plc being created and that block running.
+            try:
+                plc.safe_all_outputs()
+            except Exception as exc:
+                print(f"WARNING: could not safe PLC outputs on exit: {exc}")
         if dac is not None:
             try:
                 print("\nFinal safety step: zeroing all DAC channels...")

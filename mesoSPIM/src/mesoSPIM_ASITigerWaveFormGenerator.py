@@ -275,10 +275,29 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
 
     def close_tasks(self):
         """
-        Zeros all DAC outputs. Does NOT close the shared serial
-        connection if it's owned by the ASI stage driver -- only closes
-        it if this instance opened it itself.
+        Zeros all DAC outputs AND safes all PLC outputs (laser toggle,
+        camera trigger, etc. configured in _configure_plc_triggers()).
+
+        IMPORTANT: the PLC keeps running its programmed logic in hardware
+        regardless of the host connection -- confirmed on real hardware
+        that a 2-laser toggle kept switching on every camera trigger well
+        after the controlling process exited. plc.clear_state() (HOME)
+        does NOT stop this; only reconfiguring the physical outputs back
+        to inputs does (see asi_tiger/plc.py docstrings for the full
+        explanation). This method does that via safe_all_outputs()
+        BEFORE zeroing the DAC and disconnecting, so a mesoSPIM session
+        ending (normally or via a crash caught by whatever wraps this)
+        actually leaves lasers/shutter/camera-trigger lines quiet.
+
+        Does NOT close the shared serial connection if it's owned by the
+        ASI stage driver -- only closes it if this instance opened it
+        itself.
         """
+        if self._plc is not None:
+            try:
+                self._plc.safe_all_outputs()
+            except Exception as exc:
+                logger.error(f"ASI Tiger PLC: error safing outputs on close: {exc}")
         if self._dac is not None:
             try:
                 self._dac.zero_all()

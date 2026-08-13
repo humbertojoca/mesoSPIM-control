@@ -24,6 +24,13 @@ from .plc import (
     TRIGGER_BACKPLANE_C14, TRIGGER_BNC1,
     cell_addr, bnc_addr, backplane_addr, inverted, rising_edge, falling_edge,
 )
+from .singleaxis import (
+    SingleAxisWaveform,
+    PATTERN_SAWTOOTH, PATTERN_TRIANGLE, PATTERN_SQUARE, PATTERN_SINE, PATTERN_VARIABLE_TRIANGLE,
+    SAM_IDLE, SAM_ACTIVE, SAM_ARM_TRIGGER_ONCE, SAM_ACTIVE_SYNC, SAM_ARM_TRIGGER_FREE_RUN,
+    build_sap_code, trigger_in_backplane_addr, ttl_out_backplane_addr, axis_slot_index,
+    enable_backplane_trigger_mode,
+)
 
 __all__ = [
     "TigerController",
@@ -48,4 +55,20 @@ __all__ = [
     "inverted",
     "rising_edge",
     "falling_edge",
+    "SingleAxisWaveform",
+    "PATTERN_SAWTOOTH",
+    "PATTERN_TRIANGLE",
+    "PATTERN_SQUARE",
+    "PATTERN_SINE",
+    "PATTERN_VARIABLE_TRIANGLE",
+    "SAM_IDLE",
+    "SAM_ACTIVE",
+    "SAM_ARM_TRIGGER_ONCE",
+    "SAM_ACTIVE_SYNC",
+    "SAM_ARM_TRIGGER_FREE_RUN",
+    "build_sap_code",
+    "trigger_in_backplane_addr",
+    "ttl_out_backplane_addr",
+    "axis_slot_index",
+    "enable_backplane_trigger_mode",
 ]

@@ -21,6 +21,7 @@ Hardware facts this module encodes (see ASI docs, tggalvo page):
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+import time
 
 from .controller import TigerController, TigerError
 
@@ -50,16 +51,47 @@ DAC_RANGE_LIMITS_MV = {
 
 @dataclass
 class DacChannel:
-    """One physical DAC channel: a card address + axis letter."""
+    """
+    One physical DAC channel: a card address + axis letter.
+
+    safety_limit_mv: an OPTIONAL hard clamp tighter than the card's
+        hardware range_code. Use this when the card's electrical range
+        is wider than what's actually safe for the downstream device --
+        e.g. ASI's own hardware engineers specify the galvo card's range
+        as +/-10.24V but require commands to stay within +/-10.00V
+        ("Limit command voltage to + and - 10000 (+-10v) to guarantee
+        galvo amplifier safety") -- range_code=6 alone does NOT enforce
+        that tighter bound, safety_limit_mv does.
+    max_step_v: an OPTIONAL slew-rate limit, in volts per set_voltage()
+        call. Per ASI: "Sudden jumps in command voltage that are faster
+        then the inertial moment of the device can cause damage" to
+        galvo/tunable-lens hardware -- their card-level analog Bessel
+        low-pass filters (400Hz on ETL/laser cards, 1.6kHz on the galvo
+        card) smooth normal waveform playback, but a single large jump
+        (e.g. a GUI slider dragged quickly, or a bad script) can still
+        exceed what the filter/mechanism can absorb safely. When set,
+        set_voltage() breaks a large jump into intermediate steps of at
+        most this size instead of commanding it in one jump. This is a
+        conservative software safeguard, not a substitute for asking
+        ASI/the device datasheet what an actually-safe step size is for
+        your specific galvo/lens.
+    """
 
     name: str
     card_addr: int
     axis: str
     range_code: int = 6  # default +/-10.24V
+    safety_limit_mv: Optional[float] = None
+    max_step_v: Optional[float] = None
+    max_step_delay_s: float = 0.005
 
     @property
     def limits_mv(self):
-        return DAC_RANGE_LIMITS_MV[self.range_code]
+        lo, hi = DAC_RANGE_LIMITS_MV[self.range_code]
+        if self.safety_limit_mv is not None:
+            lo = max(lo, -self.safety_limit_mv)
+            hi = min(hi, self.safety_limit_mv)
+        return lo, hi
 
 
 class ASITigerDAC:
@@ -131,10 +163,19 @@ class ASITigerDAC:
     # ------------------------------------------------------------------
     # Channel registration
     # ------------------------------------------------------------------
-    def add_channel(self, name: str, card_addr: int, axis: str, range_code: int = 6):
-        """Register a logical channel name -> (card_addr, axis letter)."""
+    def add_channel(
+        self, name: str, card_addr: int, axis: str, range_code: int = 6,
+        safety_limit_mv: Optional[float] = None,
+        max_step_v: Optional[float] = None,
+        max_step_delay_s: float = 0.005,
+    ):
+        """
+        Register a logical channel name -> (card_addr, axis letter).
+        See DacChannel's docstring for safety_limit_mv / max_step_v.
+        """
         self.channels[name] = DacChannel(
-            name=name, card_addr=card_addr, axis=axis.upper(), range_code=range_code
+            name=name, card_addr=card_addr, axis=axis.upper(), range_code=range_code,
+            safety_limit_mv=safety_limit_mv, max_step_v=max_step_v, max_step_delay_s=max_step_delay_s,
         )
 
     def add_channels_from_config(self, cfg_section) -> None:
@@ -154,11 +195,15 @@ class ASITigerDAC:
         since DotDict subclasses dict.
         """
         for ch in cfg_section["channels"]:
+            get = ch.get if hasattr(ch, "get") else (lambda k, d=None: ch[k] if k in ch else d)
             self.add_channel(
                 name=ch["name"],
                 card_addr=ch["card_addr"],
                 axis=ch["axis"],
-                range_code=ch.get("range_code", 6) if hasattr(ch, "get") else ch["range_code"],
+                range_code=get("range_code", 6),
+                safety_limit_mv=get("safety_limit_mv", None),
+                max_step_v=get("max_step_v", None),
+                max_step_delay_s=get("max_step_delay_s", 0.005),
             )
 
     def channel_names(self) -> List[str]:
@@ -188,17 +233,49 @@ class ASITigerDAC:
     # Voltage set/get
     # ------------------------------------------------------------------
     def set_voltage(self, name: str, volts: float):
-        """Set one channel's output voltage, in volts."""
+        """
+        Set one channel's output voltage, in volts.
+
+        If the channel has max_step_v set (see DacChannel docstring --
+        ASI's explicit warning that sudden jumps can damage galvo/lens
+        hardware), a large change is broken into intermediate steps of
+        at most max_step_v, each separated by max_step_delay_s, instead
+        of being commanded in a single jump. This makes set_voltage()
+        take longer for large jumps on protected channels -- that's the
+        point, not a bug.
+        """
         ch = self._get(name)
-        mv = int(round(volts * 1000))
         lo, hi = ch.limits_mv
-        if not (lo <= mv <= hi):
+        target_mv = int(round(volts * 1000))
+        if not (lo <= target_mv <= hi):
             raise ValueError(
-                f"{volts:.4f} V ({mv} mV) is outside the configured range "
-                f"[{lo/1000:.3f}, {hi/1000:.3f}] V for channel {name!r}. "
-                f"Use set_range() first if you need a wider range."
+                f"{volts:.4f} V ({target_mv} mV) is outside the allowed range "
+                f"[{lo/1000:.3f}, {hi/1000:.3f}] V for channel {name!r} "
+                f"(hardware range_code plus any safety_limit_mv). "
+                f"Use set_range() first if you need a wider hardware range."
             )
-        self.tiger.send_command(f"M {ch.axis}={mv}", card_addr=ch.card_addr)
+
+        if ch.max_step_v is None:
+            self.tiger.send_command(f"M {ch.axis}={target_mv}", card_addr=ch.card_addr)
+            return
+
+        max_step_mv = max(1, int(round(ch.max_step_v * 1000)))
+        try:
+            current_mv = int(round(self.get_voltage(name) * 1000))
+        except Exception:
+            current_mv = target_mv  # can't read back -- just command it directly, no ramp
+
+        delta = target_mv - current_mv
+        if abs(delta) <= max_step_mv:
+            self.tiger.send_command(f"M {ch.axis}={target_mv}", card_addr=ch.card_addr)
+            return
+
+        steps = -(-abs(delta) // max_step_mv)  # ceil division
+        for i in range(1, steps + 1):
+            intermediate_mv = current_mv + round(delta * i / steps)
+            self.tiger.send_command(f"M {ch.axis}={intermediate_mv}", card_addr=ch.card_addr)
+            if i < steps:
+                time.sleep(ch.max_step_delay_s)
 
     def get_voltage(self, name: str) -> float:
         """Query a channel's current output voltage, in volts (WHERE / 'W')."""

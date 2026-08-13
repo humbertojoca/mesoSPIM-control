@@ -33,9 +33,20 @@ live laser lines. The two-laser toggle helper below implements the
 wiring ASI describes in their manual (Section 3.2/3.3, used by their
 own diSPIM plugin), but always confirm on your actual firmware build
 before trusting it with hardware.
+
+CRITICAL -- the PLC keeps running once programmed, independent of the
+host: this is a real-time hardware logic device, not something driven
+by the serial link. Confirmed on real hardware: after
+configure_two_laser_toggle() and disconnecting, the toggle kept
+switching on every camera trigger indefinitely, because clear_state()
+(HOME) only resets a flip-flop's stored bit -- it does NOT remove a
+cell's programming or a physical I/O's output configuration. Always
+call safe_all_outputs() (or the specific disable_*() helper) when
+you're done with a configuration, not clear_state() alone. See
+clear_state()'s docstring for the full explanation.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from .controller import TigerController
@@ -124,12 +135,19 @@ class PLCCard:
     Usage:
         plc = PLCCard(tiger_controller, card_addr=36, axis="E")
         plc.set_trigger_source(TRIGGER_BNC1)   # external camera TTL on BNC1
-        plc.clear_state()
+        ...
+        plc.safe_all_outputs()   # NOT clear_state() -- see clear_state()'s docstring
     """
 
     tiger: TigerController
     card_addr: int
     axis: str = "E"
+    # Tracks every physical I/O address (BNC/backplane) that has been
+    # configured as an output on THIS card during this session -- used
+    # by safe_all_outputs() to actually stop driving them on teardown.
+    # See clear_state()'s docstring for why this tracking exists: HOME
+    # does NOT do this for you.
+    _output_addrs: set = field(default_factory=set, init=False, repr=False)
 
     # ------------------------------------------------------------------
     # Pointer + raw cell/IO programming
@@ -185,6 +203,11 @@ class PLCCard:
         if io_type != IO_TYPE_INPUT and source_addr is not None:
             self.tiger.send_command(f"CCA Z={source_addr}", card_addr=self.card_addr)
 
+        if io_type == IO_TYPE_INPUT:
+            self._output_addrs.discard(io_addr)
+        else:
+            self._output_addrs.add(io_addr)
+
     # ------------------------------------------------------------------
     # Card-level operations
     # ------------------------------------------------------------------
@@ -197,8 +220,64 @@ class PLCCard:
         self.tiger.send_command(f"CCA X={preset_num}", card_addr=self.card_addr)
 
     def clear_state(self):
-        """Reset all flip-flop/one-shot/delay cell state (HOME on the PLC axis)."""
-        self.tiger.send_command(f"!{self.axis}", card_addr=None)
+        """
+        Resets stateful cells' STORED VALUE (a flip-flop's current output
+        bit, a one-shot/delay's in-progress timer) via HOME on the PLC axis.
+
+        IMPORTANT -- this does NOT stop live logic. HOME does not remove a
+        cell's TYPE/config/input wiring (CCA Y/Z, CCB), and does not touch
+        physical I/O configuration (a BNC still configured as an output,
+        still sourced from a cell, keeps being driven). The PLC evaluates
+        its programmed logic continuously in dedicated hardware, entirely
+        independent of whether anything is connected to the serial port --
+        confirmed on real hardware: a 2-laser toggle kept switching on
+        every camera trigger well after the controlling script exited,
+        because clear_state() alone was (wrongly) assumed to make things
+        safe. Use safe_all_outputs() (or disable_two_laser_toggle() for
+        that specific helper) to ACTUALLY stop driving physical outputs.
+
+        (Also fixed here: this previously sent card_addr=None, inconsistent
+        with every other method in this class, and was missing the space
+        HOME's documented syntax uses -- caused a real TimeoutError. Fixed
+        to '{card_addr}! {axis}'.)
+        """
+        self.tiger.send_command(f"! {self.axis}", card_addr=self.card_addr)
+
+    def safe_all_outputs(self):
+        """
+        Reconfigures every physical I/O this PLCCard instance has set as
+        an output (tracked automatically by configure_io()) back to
+        IO_TYPE_INPUT -- the one thing that actually stops a BNC/backplane
+        line from being driven, regardless of what logic is still
+        programmed into the cells behind it.
+
+        Call this whenever you're done with a PLC configuration, not just
+        clear_state() -- see clear_state()'s docstring for why. Safe to
+        call even if nothing was ever configured as an output (no-op).
+        """
+        for addr in list(self._output_addrs):
+            self.configure_io(addr, IO_TYPE_INPUT)
+
+    def disable_two_laser_toggle(
+        self,
+        laser0_bnc: int,
+        laser1_bnc: int,
+        toggle_cell: int = 1,
+        gate0_cell: int = 2,
+        gate1_cell: int = 3,
+    ):
+        """
+        Reverses configure_two_laser_toggle(): sets both laser BNCs back to
+        inputs FIRST (immediately stops driving them, regardless of cell
+        state), then reprograms the toggle/gate cells to a harmless
+        constant-0 output. Call with the SAME arguments used to configure
+        it. safe_all_outputs() also covers the BNC side generically if you
+        don't remember the exact cell numbers used.
+        """
+        self.configure_io(bnc_addr(laser0_bnc), IO_TYPE_INPUT)
+        self.configure_io(bnc_addr(laser1_bnc), IO_TYPE_INPUT)
+        for cell in (toggle_cell, gate0_cell, gate1_cell):
+            self.configure_cell(cell, "constant", config=0)
 
     def save(self):
         """Persist cell config, I/O config, and trigger source to non-volatile memory."""
@@ -278,6 +357,28 @@ class PLCCard:
         self.configure_io(bnc_addr(laser0_bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=cell_addr(gate0_cell))
         self.configure_io(bnc_addr(laser1_bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=cell_addr(gate1_cell))
 
+    def route_to_dac_trigger(self, backplane_addr: int, source_addr: int):
+        """
+        Route a signal (typically another cell's output) onto a backplane
+        line that a DAC card's single-axis function is listening to as
+        its external trigger input -- ASI's confirmed architecture for
+        e.g. triggering an ETL sawtooth from the PLC while a galvo runs
+        free-running (see asi_tiger.singleaxis module docstring).
+
+        backplane_addr: from asi_tiger.singleaxis.trigger_in_backplane_addr(axis_slot) --
+                        NOT a bnc_addr()/cell_addr(), this is specifically
+                        one of the four backplane trigger-in addresses
+                        (42/44/46/48) documented for SAP.
+        source_addr: whatever should drive the trigger -- another cell's
+                     cell_addr(), a bnc_addr() input, rising_edge()/
+                     falling_edge() of either, etc.
+
+        Requires a physical jumper on the DAC card's SV9 header (per ASI)
+        for that card to actually listen to the backplane line -- this
+        method only handles the PLC side of the wiring.
+        """
+        self.configure_io(backplane_addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=source_addr)
+
     def configure_shutter_gate(
         self,
         trigger_source_addr: int,
@@ -301,6 +402,18 @@ class PLCCard:
             inputs={"a": trigger_source_addr, "b": cell_addr(enable_cell)},
         )
         self.configure_io(bnc_addr(shutter_bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=cell_addr(gate_cell))
+
+    def disable_shutter_gate(self, shutter_bnc: int, enable_cell: int = 4):
+        """
+        Reverses configure_shutter_gate(): shutter BNC back to input first
+        (stops driving it immediately), then the enable/gate cells to a
+        harmless constant-0. Same "clear_state() doesn't do this for you"
+        reasoning as disable_two_laser_toggle() -- see clear_state()'s docstring.
+        """
+        gate_cell = enable_cell + 1
+        self.configure_io(bnc_addr(shutter_bnc), IO_TYPE_INPUT)
+        self.configure_cell(enable_cell, "constant", config=0)
+        self.configure_cell(gate_cell, "constant", config=0)
 
     def set_cell_state(self, cell_num: int, high: bool):
         """Directly set a stateful cell's (flip-flop) output (CCA F)."""
