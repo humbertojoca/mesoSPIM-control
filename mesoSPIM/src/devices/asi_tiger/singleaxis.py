@@ -61,6 +61,37 @@ convenience wrapper, and tools/asi_tiger_galvo_etl_demo.py for the full
 worked example matching ASI's suggested architecture.
 ======================================================================
 
+======================================================================
+UPDATE: new firmware for card 37 (galvo), confirmed on real hardware
+======================================================================
+ASI provided a new firmware for card 37 that fixes the original galvo
+speed limitation: 40kHz update rate on axes A and C, normal ~1kHz on
+B/D -- the OPPOSITE of the original SIGNAL_DAC_4CH firmware, where B/D
+were the fast pair. Bench-confirmed: 100Hz triangle waveforms on A/C
+are visibly smooth (no stepping) with this firmware, vs. the visible
+stepping seen at 50Hz on the original firmware's B/D axes.
+
+CRITICAL: this firmware also changes SAA/SAO's units (confirmed by ASI
+directly, not inferred): control range is -4000..4000 for the SAME
++/-10.24V that the original firmware represents as -10240..10240 (mV).
+Sending amplitude/offset values computed for the old millivolt
+convention would command roughly 2.56x the intended values. Pass
+units_per_volt=asi_tiger.dac.UNITS_PER_VOLT_TGGALVO (~390.625, exactly
+4000/10.24) to SingleAxisWaveform's constructor for any axis running
+this firmware -- the default (1000.0) is only correct for the original
+SIGNAL_DAC_4CH firmware, still running on cards 34 and 35. ASI confirmed
+SAF/SAP/SAM and the BACKLASH (B) filter-cutoff command are unaffected --
+only SAA/SAO's units changed. Plain M/W (asi_tiger.dac.ASITigerDAC) on
+this same axis need the identical units_per_volt for the same reason --
+see DacChannel.units_per_volt.
+
+NOT YET CONFIRMED: whether PR/range_code (the SIGNAL_DAC_4CH card-wide
+range selection) behaves the same way on this new firmware, which
+appears to have a fixed native range rather than PR's original
+selectable codes. range_code is still accepted for these channels but
+treat it as unverified on this firmware specifically.
+======================================================================
+
 Units: SAA (amplitude) and SAO (offset) are documented as "axis units".
 For SIGNAL_DAC_4CH, the MOVE/WHERE (M/W) commands use millivolts -- this
 module assumes SAA/SAO follow that same convention and converts
@@ -82,6 +113,7 @@ bounds as plain M-command voltages on the same axis.
 
 from dataclasses import dataclass
 from typing import Optional
+import time
 
 from .controller import TigerController
 
@@ -137,12 +169,19 @@ def axis_slot_index(axis: str, card_first_axis: str) -> int:
 
 def enable_backplane_trigger_mode(tiger: TigerController, card_addr: int):
     """
-    Sends 'TTL X=30' -- the card-wide input mode ASI's command:sam docs
-    say TTL-triggered single-axis modes (SAM=2 or 4) require. This is a
-    CARD-WIDE setting: calling it affects every axis on that card, not
-    just the one you're about to trigger -- call it once per card, not
-    once per axis, and be aware of what else on that card might depend
-    on the previous TTL input mode.
+    Sends 'TTL X=30' -- the card-wide input mode required for
+    TTL-triggered single-axis modes (SAM=2 or 4). Confirmed from ASI's
+    command:ttl docs (mode 30's description): "Mode 2: On the rising
+    edge of a TTL pulse, the routine is performed once. Mode 4: ...runs
+    continuously" -- and confirmed on real hardware that mode 2 responds
+    to EVERY genuine rising edge while armed, not just the first (see
+    SingleAxisWaveform.arm_triggered()'s docstring for the full story,
+    including an earlier wrong finding here that's now corrected).
+
+    This is a CARD-WIDE setting: calling it affects every axis on that
+    card, not just the one you're about to trigger -- call it once per
+    card, not once per axis, and be aware of what else on that card
+    might depend on the previous TTL input mode.
     """
     tiger.send_command("TTL X=30", card_addr=card_addr)
 
@@ -188,11 +227,25 @@ class SingleAxisWaveform:
         saw.start()
         ...
         saw.stop()   # halts the pattern -- does NOT zero the output, see module docstring
+
+    units_per_volt: raw device units per volt for SAA/SAO, matching
+        asi_tiger.dac.DacChannel.units_per_volt's meaning exactly.
+        Defaults to 1000.0 (SIGNAL_DAC_4CH's native millivolt units).
+        CONFIRMED BY ASI: their new TGGALVO-derived firmware for card 37
+        uses a control range of -4000..4000 for the SAME +/-10.24V that
+        the original firmware represents as -10240..10240 (mV) -- i.e.
+        UNITS_PER_VOLT_TGGALVO (~390.625), NOT 1000. Using the wrong
+        value here would command roughly 2.56x the intended
+        amplitude/offset on that firmware -- pass
+        asi_tiger.dac.UNITS_PER_VOLT_TGGALVO explicitly for any axis on
+        that firmware. ASI confirmed SAA/SAO are the only single-axis
+        commands affected by this unit change; SAF/SAP/SAM are unchanged.
     """
 
     tiger: TigerController
     card_addr: int
     axis: str
+    units_per_volt: float = 1000.0
 
     def configure(
         self,
@@ -206,22 +259,23 @@ class SingleAxisWaveform:
         """
         Configure (but do not start) the waveform. Call start() separately.
 
-        amplitude_v: peak-to-peak amplitude in volts (converted to mV for SAA).
-                     Negative values reverse ramp direction (see command:saa).
-        offset_v: center position in volts (converted to mV for SAO) --
-                  output will swing between offset-amplitude/2 and
-                  offset+amplitude/2.
+        amplitude_v: peak-to-peak amplitude in volts (converted to raw
+                     units via units_per_volt for SAA). Negative values
+                     reverse ramp direction (see command:saa).
+        offset_v: center position in volts (converted to raw units via
+                  units_per_volt for SAO) -- output will swing between
+                  offset-amplitude/2 and offset+amplitude/2.
         period_ms: waveform period in milliseconds (internal clock).
                    Triangle/square patterns force this to an even number
                    of ms automatically (per command:saf). 1ms is
                    documented as undefined behavior -- avoid it.
         """
-        amp_mv = int(round(amplitude_v * 1000))
-        off_mv = int(round(offset_v * 1000))
+        amp_raw = int(round(amplitude_v * self.units_per_volt))
+        off_raw = int(round(offset_v * self.units_per_volt))
         sap_code = build_sap_code(pattern, external_trigger=external_trigger, ttl_out=ttl_out)
 
-        self.tiger.send_command(f"SAA {self.axis}={amp_mv}", card_addr=self.card_addr)
-        self.tiger.send_command(f"SAO {self.axis}={off_mv}", card_addr=self.card_addr)
+        self.tiger.send_command(f"SAA {self.axis}={amp_raw}", card_addr=self.card_addr)
+        self.tiger.send_command(f"SAO {self.axis}={off_raw}", card_addr=self.card_addr)
         self.tiger.send_command(f"SAF {self.axis}={period_ms:.0f}", card_addr=self.card_addr)
         self.tiger.send_command(f"SAP {self.axis}={sap_code}", card_addr=self.card_addr)
 
@@ -238,10 +292,45 @@ class SingleAxisWaveform:
         """
         Stop the pattern (SAM=0) -- returns to idle. Does NOT zero the
         output voltage; the axis holds wherever the waveform left it.
-        Follow with an explicit M {axis}=0 (or ASITigerDAC.zero_all())
-        if you need the physical output at 0V.
+
+        CONFIRMED ON REAL HARDWARE: SAM=0 is not optional cleanup, it's a
+        hard prerequisite for M to work on this axis AT ALL. While SAM!=0
+        (including after a one-shot SAM=2 cycle finishes -- it does NOT
+        return to SAM=0 on its own), a plain M command is silently
+        ACCEPTED (':A') but has no effect on the output -- no error, no
+        indication anything was ignored. Always call stop() (or
+        stop_and_zero() below) before M, not the other way around, and
+        do this EVEN IF you don't believe single-axis mode was ever
+        started on this axis in the current process/session -- a leftover
+        state from a previous run/process has exactly this effect, and
+        there's no way to query it that's simpler than just calling
+        stop() defensively before your first M command on any axis you
+        haven't explicitly zeroed-and-confirmed already.
         """
         self.tiger.send_command(f"SAM {self.axis}=0", card_addr=self.card_addr)
+
+    def stop_and_zero(self, settle_s: float = 0.05):
+        """
+        stop() followed by M {axis}=0 -- the safe sequence, in the
+        correct order. Use this instead of hand-rolling stop()+M=0
+        wherever you need an axis at a known-safe 0V state, including
+        defensively at the START of a script (see stop()'s docstring for
+        why "M=0 first, just in case" does NOT work if the axis is
+        already in single-axis mode from a previous session).
+
+        settle_s: delay between SAM=0 and M=0. UNCONFIRMED whether this
+        is actually needed -- added defensively in case the card needs
+        time to internally finish releasing single-axis control before
+        accepting a move command; harmless if it turns out not to be
+        necessary. If M still doesn't take effect even with this delay,
+        the cause is something other than a settle-time race -- see
+        stop()'s docstring and check RDSTAT/W after SAM=0 rather than
+        assuming a longer delay would help.
+        """
+        self.stop()
+        if settle_s > 0:
+            time.sleep(settle_s)
+        self.tiger.send_command(f"M {self.axis}=0", card_addr=self.card_addr)
 
     def arm_triggered(self, free_running: bool = False):
         """
@@ -251,19 +340,71 @@ class SingleAxisWaveform:
         once for this card (module-level function above) -- both are
         prerequisites this method does NOT do for you, since the latter
         is a card-wide setting affecting every axis on the card.
+
+        free_running=False (SAM=2, "once"): CONFIRMED on real hardware
+        that this DOES auto-rearm -- one cycle per genuine rising edge,
+        repeatedly, with no host intervention needed between triggers.
+        ASI's own TTL X=30 docs say this plainly ("on the rising edge of
+        a TTL pulse, the routine is performed once" -- describing each
+        edge, not just the first), and this was independently confirmed
+        by testing: arm ONCE with arm_triggered(), then send 3 separate
+        clean low->high->low pulses -- all 3 produced a fresh ramp, each
+        one starting right at its pulse's rising edge.
+
+        AN EARLIER VERSION OF THIS DOCSTRING CLAIMED THE OPPOSITE (did
+        not auto-rearm) -- that was wrong, and traced to a testing
+        artifact: holding the trigger line high (a level) rather than
+        producing a genuine edge each time only ever generates ONE
+        rising edge no matter how long you hold it, which looks
+        identical to "no auto-rearm" on a scope but isn't the same
+        thing. Pulse cleanly (low->high->low) if you're testing this
+        yourself, not by holding a line at a fixed level.
+
+        Practical implication: arm ONCE at acquisition start, and every
+        subsequent real camera trigger (or PLC-generated pulse) drives a
+        correctly-timed cycle autonomously in hardware -- no per-frame
+        host round-trip required, no serial-latency budget to worry
+        about. This is the mode to use for real per-frame ETL sync, not
+        free_running=True below.
+
+        free_running=True (SAM=4): runs continuously after the FIRST
+        trigger, on its OWN internal clock -- it does not re-sync to
+        subsequent triggers at all. Because it and the trigger source
+        (e.g. a camera) are independent clocks, their relative phase
+        will drift continuously and non-monotonically over time, even if
+        both are nominally set to the same period -- this looks like
+        "jitter" on a scope across many cycles, but it's clock-drift
+        beat frequency, not trigger-response jitter, and is not fixable
+        by anything in software. Given free_running=False now confirmed
+        to auto-rearm correctly, there's little reason to prefer this
+        mode for camera-synced scanning.
         """
         mode = SAM_ARM_TRIGGER_FREE_RUN if free_running else SAM_ARM_TRIGGER_ONCE
         self.tiger.send_command(f"SAM {self.axis}={mode}", card_addr=self.card_addr)
 
     def is_active(self) -> bool:
         """
-        Best-effort check via RDSTAT: while single-axis mode is active,
-        the axis move-status character is 'A'. Returns False on any
-        parse failure rather than raising, since exact RDSTAT reply
-        formatting can vary.
+        Checks via RDSTAT [axis]+ (the '+' qualifier is required -- see
+        command:rdstat: without it, RDSTAT returns a raw numeric status
+        code, not the move-status character. Confirmed on real hardware
+        that the bare 'RDSTAT {axis}' form used here previously returned
+        a plain number like '130', making the old "'A' in reply" check
+        silently useless -- it would never correctly detect active
+        single-axis mode, just always return False without erroring).
+
+        With '+', the reply is the single right-side status character
+        shown on ASI's LCD: 'A' = single axis move (what we're checking
+        for), 'M'/'B'/'K'/'S'/'T'/'P'/'E' = other move states, or a SPACE
+        for idle/no event -- confirmed on real hardware that this shows
+        up here as an EMPTY string, not a literal " ", because
+        TigerController.send_command() strips whitespace from every
+        reply. That's expected and correct: "A" in "" is already False,
+        so idle is correctly detected as not-active. Just don't mistake
+        the empty reply for a communication failure if you're debugging
+        this by hand -- it's the confirmed-idle signal, not an error.
         """
         try:
-            reply = self.tiger.send_command(f"RDSTAT {self.axis}", card_addr=self.card_addr)
+            reply = self.tiger.send_command(f"RDSTAT {self.axis}+", card_addr=self.card_addr)
             return "A" in reply
         except Exception:
             return False

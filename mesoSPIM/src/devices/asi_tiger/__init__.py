@@ -16,7 +16,10 @@ output cards.
 """
 
 from .controller import TigerController, TigerError
-from .dac import ASITigerDAC, DacChannel, DAC_RANGE_CODES, DAC_RANGE_LIMITS_MV
+from .dac import (
+    ASITigerDAC, DacChannel, DAC_RANGE_CODES, DAC_RANGE_LIMITS_MV,
+    UNITS_PER_VOLT_SIGNAL_DAC, UNITS_PER_VOLT_TGGALVO,
+)
 from .plc import (
     PLCCard, CELL_TYPE,
     IO_TYPE_INPUT, IO_TYPE_OPEN_DRAIN_OUTPUT, IO_TYPE_PUSH_PULL_OUTPUT,
@@ -39,6 +42,8 @@ __all__ = [
     "DacChannel",
     "DAC_RANGE_CODES",
     "DAC_RANGE_LIMITS_MV",
+    "UNITS_PER_VOLT_SIGNAL_DAC",
+    "UNITS_PER_VOLT_TGGALVO",
     "PLCCard",
     "CELL_TYPE",
     "IO_TYPE_INPUT",

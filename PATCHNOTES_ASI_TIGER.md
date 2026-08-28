@@ -434,6 +434,351 @@ physical prerequisite this script can't verify -- if the ETL never
 responds to trigger pulses, check that first before assuming the
 software is wrong.
 
+## Fix: ETL period was hardcoded to the galvo's period, plus a real trigger-mode question
+
+Found via real hardware testing (galvo confirmed working, ETL jumpers
+installed): `asi_tiger_galvo_etl_demo.py` had `etl_period_ms = galvo_period_ms`
+-- the ETL's waveform period was silently forced to match the galvo's,
+with no way to set it independently. This meant the ETL sawtooth
+duration could never actually match a camera's real exposure time
+unless it happened to equal the galvo's scan period. Fixed:
+
+- New `--etl-period-ms`, fully decoupled from `--galvo-frequency` --
+  set it to your camera's actual exposure time.
+- New `--etl-trigger-mode {once, free_run}`. The demo previously only
+  used `free_run` (`SAM=4`): waits for the first trigger, then runs on
+  its own internal clock indefinitely -- it does NOT re-sync to later
+  camera triggers and will drift over an acquisition. `once` (`SAM=2`)
+  is architecturally the right mode for true per-frame sync (one ramp
+  cycle per trigger), but whether it auto-rearms for the next trigger or
+  needs the host to re-arm it after every single frame is genuinely
+  unconfirmed here -- that distinction matters a lot (auto-rearm is
+  usable at real frame rates; host re-arm over serial almost certainly
+  isn't). The script now prints an explicit note to test this on a scope
+  (pulse the trigger BNC multiple times, watch whether the ETL responds
+  to each pulse or only the first) rather than asserting an answer.
+
+Both `SAM=2` and `SAM=4` command generation verified against a mocked
+serial device; not yet re-verified on real hardware which trigger mode
+is actually correct for repeated per-frame triggering.
+
+## Confirmed on real hardware: SAM=0 is required before M works at all
+
+Found via real hardware testing: while an axis is under single-axis
+control (including after a one-shot `SAM=2` cycle finishes -- it does
+NOT return to `SAM=0` on its own), a plain `M` command is **silently
+accepted (`:A`) but has no effect on the output.** No error, no
+indication anything was ignored -- the axis just sits at whatever
+voltage the pattern left it at (confirmed case: a one-shot sawtooth
+holding at its peak indefinitely after `M {axis}=0` returned success).
+
+This turned a documentation note ("stop() doesn't zero the output,
+follow with M=0") into something that needed to be load-bearing in the
+code, not just advisory text -- and exposed a real bug: both
+`asi_tiger_galvo_etl_demo.py` and `asi_tiger_singleaxis_test.py` zeroed
+axes with a plain `M=0` at the very START of the script too, as a
+"baseline safety" step -- which silently does nothing if an axis is
+already stuck in single-axis mode from a previous run (exactly the
+scenario that surfaced this). Fixed:
+
+- New `SingleAxisWaveform.stop_and_zero()` -- `SAM=0` then `M=0`, in the
+  required order, as one call. `stop()`'s docstring now states the
+  hardware-confirmed behavior explicitly rather than implying `M` would
+  just work once you got around to it.
+- Both scripts now call `stop_and_zero()` defensively at startup
+  (creating a `SingleAxisWaveform` purely to reset a possibly-stuck axis,
+  even before `configure()` is ever called) instead of a bare `M=0`, and
+  use it in their cleanup paths instead of hand-rolling `stop()` + `M=0`
+  in the right order every time.
+- Cleaned up stale text in `asi_tiger_singleaxis_test.py` left over from
+  before the GALVO_SPIM correction (still said "not yet confirmed,
+  expected to fail" -- galvo triangle wave has since been confirmed
+  working on a scope).
+
+Verified the fixed command order (`SAM {axis}=0` then `M {axis}=0`)
+against a mocked serial device; the underlying "M is silently ignored
+under SAM control" behavior itself is the real-hardware-confirmed part,
+not something mocked.
+
+**Still open**: this same footgun applies to `ASITigerDAC.zero_all()`/
+`set_voltage()` if a channel is ever under single-axis control when
+those are called -- they'd silently no-op on that channel too, same as
+plain `M`. Not currently a live issue since `mesoSPIM_ASITigerWaveFormGenerator`
+doesn't yet use `SingleAxisWaveform` (only `ASITigerDAC` + `PLCCard`),
+but this needs handling when/if single-axis gets wired into the adapter
+-- `close_tasks()` would need to `SAM=0` any single-axis-controlled
+channels before calling `zero_all()`, or that zero_all() call would give
+a false sense of safety on shutdown.
+
+## Shared trigger source: addressing camera-vs-ETL jitter
+
+Diagnostic history: confirmed the camera's own trigger output has
+negligible jitter on a scope; confirmed `free_run` mode's apparent
+jitter is actually independent-clock phase drift (not fixable in
+software -- once/free_run architecture is fundamentally two separate
+clocks after the first trigger); confirmed `once` mode does not
+auto-rearm (real hardware, both `--raw` and script agree: after one
+cycle it holds at the pattern's end value until re-armed or stopped).
+
+That leaves the camera->PLC->DAC relay chain itself as the remaining
+jitter source: two independently-quantized hardware stages (the PLC's
+own internal evaluation cycle, up to 4kHz so up to ~250us of
+quantization uncertainty; the DAC's own internal trigger-sampling loop)
+sit between the camera's clean output and the ETL's response, each
+adding independent uncertainty to their *relative* timing.
+
+**Fix direction**: have the PLC generate the trigger itself and fan it
+out to both the camera's external trigger input and the ETL's backplane
+trigger-in simultaneously, instead of relaying an externally-arriving
+camera edge. Both branches then share the exact same output transition,
+so the PLC's own quantization affects them identically and cancels out
+of their relative timing -- only the DAC's own trigger response latency
+remains as an unknown.
+
+This pairs with the "once mode doesn't auto-rearm" finding rather than
+fighting it: mesoSPIM already calls `run_tasks()` once per frame from
+host software (matching the original NI per-sweep `single_pulse`
+pattern), so host-mediated re-arming isn't architecturally foreign to
+this codebase -- the open question is purely empirical: is a serial
+round-trip fast enough relative to real frame rates?
+
+New:
+- **`PLCCard.fan_out_trigger(source_addr, output_addrs)`** -- routes one
+  signal onto multiple physical outputs at once (any mix of `bnc_addr()`
+  and `trigger_in_backplane_addr()`). Verified against a mocked serial
+  device: both outputs configured from the same source cell, both
+  correctly tracked by `_output_addrs` for `safe_all_outputs()` cleanup.
+- **`tools/asi_tiger_shared_trigger_test.py`** -- runs N simulated
+  frames, each: re-arm ETL (`SAM=2`), fire the shared PLC pulse to
+  camera BNC + ETL trigger-in, wait. Reports min/max/mean/stdev of the
+  `SAM=2` round-trip time so you have real numbers (not a guess) for
+  whether this approach fits your target frame rate. Mock-tested
+  end-to-end; the reported statistics on real hardware are the actual
+  answer to that question, not something I can predict from here.
+
+Still unconfirmed: whether this measurably reduces the observed jitter
+on a scope (the reasoning above is sound, but hasn't been bench-verified
+yet), and whether the per-frame re-arm round-trip is fast enough for
+this project's actual target frame rate -- both are exactly what
+`asi_tiger_shared_trigger_test.py` is for.
+
+## New TGGALVO firmware for card 37: units_per_volt, and A/C become the fast axes
+
+ASI provided new firmware for card 37 (galvo) specifically, to fix the
+original speed limitation. Bench-confirmed working: **100Hz triangle
+waveforms on axes A/C are visibly smooth** (no stepping), vs. the
+visible stepping seen at 50Hz on the original firmware's B/D axes.
+
+ASI's own description of the firmware:
+
+> This firmware will provide 40KHz update rate on the first and third
+> axes (A and C) and the normal 1KHz update rate on axes B and D. The
+> single-axis commands all function the same, as does the B command for
+> changing the filter cutoffs. The only difference is that the original
+> firmware (SIGNAL_DAC firmware) takes millivolts as the input control
+> units ([-10240, 10240] control range -> [-10.24v, 10.24v] voltage
+> range), but the new firmware uses a control range of -4000 to 4000
+> ([-4000, 4000] control range -> [-10.24v, 10.24v] voltage range). The
+> new firmware is an adaptation of a micromirror control whose input
+> range was in milliradians. To translate old amplitude (SAA) and
+> offset (SAO) values to the new DAC coordinate system (+-4K), multiply
+> the old SAA and SAO numbers by around 0.4.
+
+Two real, breaking changes follow from this:
+
+1. **Which axes are fast, reversed.** A/C are now the 40kHz pair, B/D
+   the normal ~1kHz pair -- the OPPOSITE of the original SIGNAL_DAC_4CH
+   firmware, where B/D were fastest. Every earlier reference to "B/D
+   are the fast galvo axes" in this codebase was correct for the
+   original firmware and is now wrong for card 37 specifically.
+2. **SAA/SAO's units changed**, and by strong inference (not
+   independently confirmed by ASI in this exchange, since their email
+   only explicitly discusses SAA/SAO) plain M/W almost certainly changed
+   too, since they address the same underlying axis position
+   representation -- a firmware wouldn't typically split a single axis's
+   position between two different unit conventions depending on which
+   command touches it. Verified the exact ratio against ASI's "~0.4"
+   approximation: 4000/10240 = 0.390625, and 1/0.390625 = 2.561 --
+   matches their approximation closely enough to trust the precise
+   fraction over the rounded one.
+
+### What changed in the code
+
+Added `units_per_volt` throughout (`asi_tiger/dac.py`,
+`asi_tiger/singleaxis.py`) rather than hardcoding the mV conversion:
+
+- **`DacChannel.units_per_volt`** (default `1000.0`, the original
+  firmware's millivolt convention) and new constants
+  `UNITS_PER_VOLT_SIGNAL_DAC` (1000.0) / `UNITS_PER_VOLT_TGGALVO`
+  (4000/10.24 = 390.625, exact fraction, not the rounded ~0.4).
+- **`ASITigerDAC.set_voltage()`/`get_voltage()`** rewritten so that
+  **safety bounds (`limits_mv`/`safety_limit_mv`) stay expressed in
+  real voltage terms, firmware-agnostic** -- only the final wire
+  encoding (the integer actually sent in the `M` command) uses
+  `units_per_volt`. This means ASI's galvo amplifier safety limit
+  (+/-10.00V) keeps working correctly regardless of which firmware/
+  encoding a channel uses, rather than needing separate safety logic
+  per firmware. `max_step_v` ramping now interpolates in volts and
+  encodes each intermediate step individually, for the same reason.
+- **`SingleAxisWaveform.units_per_volt`** (new constructor field, same
+  default/meaning) -- `configure()`'s SAA/SAO encoding now uses this
+  instead of a hardcoded `*1000`.
+- **`config_asi_tiger_example.py`**: `galvo_l`/`galvo_r` now map to
+  **A/C** (not B/D), each with `units_per_volt: 4000/10.24` set
+  explicitly. ETL/laser channels unchanged -- still the original
+  firmware, `units_per_volt` defaults correctly for them.
+- **`asi_tiger_galvo_etl_demo.py`** and **`asi_tiger_singleaxis_test.py`**:
+  new `--galvo-units-per-volt`/`--units-per-volt` flags (default to the
+  new firmware's constant), galvo axis default changed to `A`, usage
+  examples and printed summaries updated to show which firmware's
+  encoding is active.
+
+### Testing performed
+
+All against a mocked serial device (real hardware re-verification of
+the encoding itself is still pending, though the *pattern smoothness*
+at 100Hz on A/C is already bench-confirmed independent of this specific
+code path):
+
+- Backward compatibility: channels with no `units_per_volt` specified
+  encode identically to before this change (verified exact command
+  strings).
+- New-firmware channel: 2.0V correctly encodes to 781 raw units
+  (`round(2.0 * 390.625)`), cross-checked against ASI's own "~0.4"/
+  "~2.56x" approximation.
+- Safety limit (`safety_limit_mv=10000`) still correctly rejects 10.2V
+  on a new-firmware channel -- confirms the safety check truly stayed
+  firmware-agnostic, not just coincidentally correct.
+- Voltage readback round-trips correctly through the new encoding
+  (small float rounding only, ~0.05mV, expected from a non-power-of-10
+  units-per-volt ratio).
+- Slew-rate ramping (`max_step_v`) produces correctly-encoded
+  intermediate steps and lands exactly on the target raw value.
+- `SingleAxisWaveform.configure()`'s SAA encoding independently
+  cross-checked against the same 2.56x ratio.
+- Config file (`config_asi_tiger_example.py`) loads correctly through
+  the exact `add_channel(**ch)` call pattern
+  `mesoSPIM_ASITigerWaveFormGenerator.create_tasks()` actually uses,
+  not a synthetic shortcut.
+- Full syntax sweep across every file in the patch after these changes.
+
+### Still open
+
+- Whether plain `M`/`W` really do use the new units on card 37 is
+  inferred, not independently confirmed by ASI in the text quoted above
+  -- worth a direct one-line confirmation from them, or an empirical
+  check (`M A=1000` on the new firmware, read back with `W A`, see what
+  voltage results) before fully trusting `ASITigerDAC` on this axis.
+- Whether `PR`/`range_code` (the original firmware's card-wide range
+  selection) behaves the same way on the new firmware, which appears to
+  have a fixed native range rather than PR's original selectable codes.
+- The BACKLASH filter-cutoff investigation from earlier in this project
+  (whether 1.6kHz could be raised) is superseded by this firmware
+  update for the fast axes specifically -- worth revisiting whether it's
+  still relevant for B/D, now the normal-speed pair.
+
+## CORRECTION: SAM=2 ("once" mode) DOES auto-rearm
+
+An earlier section of this document (and the code/docstrings it
+described) stated, as a confirmed real-hardware finding, that SAM=2
+does not auto-rearm -- that after one triggered cycle it holds at the
+pattern's end value until the host re-arms it. **That finding was
+wrong**, and traced to a testing-methodology artifact, not a real
+hardware limitation.
+
+What actually happened: earlier testing held the trigger line at a
+sustained high level rather than producing a genuine low->high->low
+pulse for each attempted trigger. A held-high level is exactly ONE
+rising edge, no matter how long it's held -- indistinguishable on a
+scope from "doesn't respond to further triggers," but not the same
+thing as testing repeated triggering at all.
+
+**Corrected via ASI's own docs plus direct re-testing**: `command:ttl`'s
+description of `TTL X=30` (the input mode single-axis triggered modes
+require) says, of SAM mode 2 specifically: *"On the rising edge of a
+TTL pulse, the routine is performed once"* -- describing behavior on
+*each* edge, not just the first. Re-tested with a proper pulse train (a
+PLC cell explicitly toggled low->high->low three separate times via
+`--raw`): **all three pulses produced a fresh ramp**, each one starting
+right at its own rising edge. SAM=2 auto-rearms correctly, with no host
+intervention needed between triggers.
+
+### Practical implications
+
+This is good news architecturally -- it removes a real constraint the
+earlier design was built around:
+
+- **No host-mediated per-frame re-arming needed.** Arm once (`SAM=2`)
+  at acquisition start; every subsequent genuine trigger edge (camera-
+  or PLC-generated) drives a correctly-timed cycle autonomously in
+  hardware. The serial-round-trip-per-frame concern from earlier in this
+  document no longer applies to this specific mode.
+- **`once` is now the recommended default** for camera-synced ETL
+  scanning, not `free_run` -- it doesn't have `free_run`'s independent-
+  clock drift problem, and doesn't need host re-arming either.
+
+### What changed in the code
+
+- `SingleAxisWaveform.arm_triggered()` and `enable_backplane_trigger_mode()`
+  docstrings corrected -- both explain the actual confirmed behavior and
+  the earlier testing artifact, rather than silently deleting the wrong
+  claim (so the mistake and its correction are both visible in history).
+- `asi_tiger_galvo_etl_demo.py`: `--etl-trigger-mode` default changed
+  from `free_run` to `once`; help text and runtime print updated.
+- `asi_tiger_shared_trigger_test.py`: significantly simplified. The
+  previous version re-armed `SAM=2` before every single simulated frame
+  and measured that round-trip's timing -- built entirely on the wrong
+  finding. Rewritten to arm ONCE at the start, then fire N pulses with
+  zero `SAM` commands in the per-frame loop, so it now actually tests
+  what matters: does auto-rearm hold up over many cycles (not just the
+  3 tested by hand), and does timing stay consistent frame-to-frame.
+
+### Still open
+
+- The 3-pulse manual test is a small sample by hand-triggered standards.
+  `asi_tiger_shared_trigger_test.py`'s rewritten form is built to check
+  this at realistic frame counts and rates -- run it before fully
+  trusting auto-rearm at your actual target frame rate.
+- Whether there's an upper rate limit where auto-rearm starts missing
+  edges (e.g. if a new trigger arrives before the DAC has finished
+  processing the previous cycle) is unknown -- worth checking at your
+  real frame rate, not just the slow hand-triggered pace used so far.
+
+## Confirmed: SAM=2 needs real margin below the trigger interval
+
+Found via real hardware testing (camera-triggered ETL, both directions
+of the trigger architecture): setting `--etl-period-ms` to *exactly*
+match the camera's real trigger interval causes the ETL to fire on only
+**every other** trigger. Reducing the period by 2-3ms was enough to fire
+on every single trigger reliably.
+
+Mechanically this makes sense given everything else confirmed about
+`SAM=2` in this document: it runs one full cycle over the programmed
+`SAF` period before it's ready for the next trigger. With zero margin,
+the axis is still mid-cycle exactly when the next edge arrives -- close
+enough to the boundary that it misses that edge, then has a full two
+periods of slack before the *following* edge, which it catches. That's
+precisely an every-other-trigger pattern.
+
+**Fix**: added an explicit margin safety check to both
+`asi_tiger_galvo_etl_demo.py` (`--camera-period-ms`, purely for this
+check, doesn't touch any hardware command) and
+`asi_tiger_shared_trigger_test.py` (compares `--etl-period-ms` against
+`--frame-interval-s` directly, since that script already knows both).
+Both warn and ask for confirmation if the margin is under 2ms rather
+than letting this be silently rediscovered as a mysterious
+every-other-pulse pattern on a scope. Verified the warning fires
+correctly at exactly zero margin and cancels on decline, and that
+sufficient margin (3ms in testing) shows a clean confirmation and
+proceeds without interruption.
+
+**Still open**: whether 2ms is the right minimum margin at other frame
+rates, or whether it should scale with the period rather than being a
+fixed value -- 2-3ms was sufficient at the rate tested, not
+independently verified across a range of frame rates. Treat the 2ms
+default as a starting point to verify on a scope, not a guaranteed-safe
+number for every configuration.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level -- the only

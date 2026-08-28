@@ -39,44 +39,55 @@ asi_dac_parameters = {
     # -- must match bundle_galvo_and_etl_waveforms() in
     # mesoSPIM_WaveFormGenerator.py.
     #
-    # Card 7 (A/B/C/D): -10.24 to +10.24V, 1.6kHz analog Bessel low-pass
-    #   filter, intended for galvo control. Axes B and D are ASI's
-    #   guaranteed-fastest-response channels on this card (a few hundred
-    #   microseconds less delay than A/C) -- use them for the actual scan
-    #   axes, which is why galvo_l/galvo_r map to B/D below, not A/C.
-    #   SAFETY (ASI, verbatim): "Limit command voltage to + and - 10000
-    #   (+-10v) to guarantee galvo amplifier safety." range_code=6 alone
-    #   allows the full +/-10.24V hardware range -- safety_limit_mv=10000
-    #   below is what actually enforces the tighter +/-10.00V bound; do
-    #   not remove it.
+    # Card 7 (A/B/C/D): -10.24 to +10.24V, intended for galvo control.
+    #   UPDATED: ASI provided new firmware for this card (bench-confirmed
+    #   working -- 100Hz triangle waveforms on A/C are visibly smooth,
+    #   vs. audible/visible stepping at 50Hz on the original firmware's
+    #   B/D). This new firmware REVERSES which axes are fast: A and C
+    #   now run at 40kHz, B/D at the normal ~1kHz -- the opposite of the
+    #   original SIGNAL_DAC_4CH firmware, where B/D were fastest. Hence
+    #   galvo_l/galvo_r map to A/C below, not B/D.
+    #
+    #   CRITICAL UNITS CHANGE (confirmed by ASI directly): this new
+    #   firmware's control range is -4000..4000 for the SAME +/-10.24V
+    #   the original firmware represents as -10240..10240 (mV). That's
+    #   units_per_volt = 4000/10.24 = ~390.625, NOT 1000 -- using the
+    #   default here would command ~2.56x the intended voltage. Both
+    #   'units_per_volt' below (for plain M/W via ASITigerDAC) AND the
+    #   equivalent constructor arg on SingleAxisWaveform (for SAA/SAO)
+    #   need this value for any axis on this firmware. See
+    #   asi_tiger.dac.UNITS_PER_VOLT_TGGALVO for the exact constant.
+    #
+    #   SAFETY (ASI, verbatim, still applies regardless of firmware/units):
+    #   "Limit command voltage to + and - 10000 (+-10v) to guarantee
+    #   galvo amplifier safety." safety_limit_mv is expressed in REAL
+    #   VOLTAGE (mV) terms and stays correct regardless of
+    #   units_per_volt -- do not remove it.
     #
     # Card 4 (H/I/J/K): 0 to 4.096V, 400Hz LPF, intended for Tunable Lens
-    #   control (into an EL-E-4 driver). Axes I and K are the
-    #   guaranteed-fastest here, hence etl_l/etl_r map to I/K, not H/J.
+    #   control (into an EL-E-4 driver). Still running the ORIGINAL
+    #   SIGNAL_DAC_4CH firmware (units_per_volt defaults to 1000, the
+    #   standard millivolt convention -- no change needed here). Axes I
+    #   and K are the guaranteed-fastest here, hence etl_l/etl_r map to
+    #   I/K.
     #
     # max_step_v on all four: ASI's own warning -- "Sudden jumps in
     # command voltage that are faster then the inertial moment of the
-    # device can cause damage" to the galvo/lens. The 1.6kHz/400Hz analog
-    # filters smooth normal waveform playback, but a single large jump
-    # (a GUI slider dragged quickly, a bad script) can still exceed what
-    # they can absorb. 0.5V/0.2V are conservative STARTING defaults, not
-    # numbers ASI verified for your specific galvo/lens -- tune down if
-    # you have datasheet numbers for actual safe slew rates, and test
-    # cautiously.
-    #
-    # FIRMWARE NOTE: as shipped, these cards do NOT have GALVO_SPIM
-    # firmware, which is what's needed for the on-card single-axis
-    # waveform generator (asi_tiger/singleaxis.py, SAA/SAF/SAO/SAP/SAM).
-    # Until that's flashed (ask ASI -- see PATCHNOTES_ASI_TIGER.md), only
-    # plain M-command voltage control (manual + WaveformStreamer's
-    # software-timed loop) works on these channels.
+    # device can cause damage" to the galvo/lens. The analog LPFs smooth
+    # normal waveform playback, but a single large jump (a GUI slider
+    # dragged quickly, a bad script) can still exceed what they can
+    # absorb. 0.5V/0.2V are conservative STARTING defaults, not numbers
+    # ASI verified for your specific galvo/lens -- tune down if you have
+    # datasheet numbers for actual safe slew rates, and test cautiously.
     'galvo_etl_channels': [
-        {'name': 'galvo_l', 'card_addr': 37, 'axis': 'B', 'range_code': 6,
-         'safety_limit_mv': 10000, 'max_step_v': 0.5},
-        {'name': 'galvo_r', 'card_addr': 37, 'axis': 'D', 'range_code': 6,
-         'safety_limit_mv': 10000, 'max_step_v': 0.5},
+        {'name': 'galvo_l', 'card_addr': 37, 'axis': 'A', 'range_code': 6,
+         'safety_limit_mv': 10000, 'max_step_v': 0.5,
+         'units_per_volt': 4000 / 10.24},  # new TGGALVO firmware -- see note above
+        {'name': 'galvo_r', 'card_addr': 37, 'axis': 'C', 'range_code': 6,
+         'safety_limit_mv': 10000, 'max_step_v': 0.5,
+         'units_per_volt': 4000 / 10.24},
         {'name': 'etl_l',   'card_addr': 34, 'axis': 'I', 'range_code': 1,
-         'max_step_v': 0.2},
+         'max_step_v': 0.2},  # original firmware -- default units_per_volt (1000) is correct
         {'name': 'etl_r',   'card_addr': 34, 'axis': 'K', 'range_code': 1,
          'max_step_v': 0.2},
     ],

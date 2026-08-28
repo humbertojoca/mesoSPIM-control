@@ -10,22 +10,37 @@ the intended path for galvo scanning (see PATCHNOTES_ASI_TIGER.md's
 bandwidth discussion -- this sidesteps that problem entirely, IF your
 card's firmware implements this module).
 
-NOT YET CONFIRMED on SIGNAL_DAC_4CH specifically -- ASI's docs describe
-this in terms of "MicroMirror cards". This script's first configure()
-call is the actual test: a ':N-#' error reply means your card doesn't
-implement this module. UPDATE: ASI has since confirmed these specific
-DAC cards shipped WITHOUT the GALVO_SPIM firmware this module needs --
-so this test is currently EXPECTED to fail until that firmware is
-installed. Run it anyway to get the real, confirmed error rather than
-assuming; re-run once ASI has updated the firmware.
+CONFIRMED WORKING on this rack's firmware -- single-axis function does
+NOT require GALVO_SPIM firmware, contrary to an earlier note here (see
+PATCHNOTES_ASI_TIGER.md's "CORRECTION" section for the full story). The
+galvo has been tested successfully with this script's approach
+(triangle wave confirmed on a scope). Use this script to test/tune a
+single axis in isolation; use tools/asi_tiger_galvo_etl_demo.py for the
+full galvo+ETL+PLC recipe.
+
+UPDATE -- new firmware on card 37: ASI provided new TGGALVO-derived
+firmware for the galvo card specifically, bench-confirmed working (100Hz
+triangle on A/C is visibly smooth). Two things changed from the
+original SIGNAL_DAC_4CH firmware: (1) A and C are now the 40kHz-fast
+axes, B/D the normal ~1kHz pair -- the OPPOSITE of the original
+firmware; (2) SAA/SAO's units changed to a control range of -4000..4000
+for the same +/-10.24V the original represents as -10240..10240 (mV) --
+use --units-per-volt (see below) to select the right encoding for your
+card's actual firmware.
 
 Usage (per ASI's confirmed card assignments for this rack):
-    # Galvo card (7 = A/B/C/D, +/-10.24V range, B/D are the fast axes):
+    # Galvo card (7 = A/B/C/D), NEW TGGALVO firmware, A/C are fast:
+    python tools/asi_tiger_singleaxis_test.py --port COM4 --card-addr 37 --axis A \\
+        --pattern triangle --amplitude 2.0 --offset 0 --frequency 100 --duration 15
+
+    # Galvo card, ORIGINAL SIGNAL_DAC_4CH firmware (if not yet reflashed), B/D fast:
     python tools/asi_tiger_singleaxis_test.py --port COM4 --card-addr 37 --axis B \\
-        --pattern sawtooth --amplitude 2.0 --offset 0 --frequency 50 --duration 15
+        --pattern sawtooth --amplitude 2.0 --offset 0 --frequency 50 --duration 15 \\
+        --units-per-volt 1000
 
     # ETL card (4 = H/I/J/K, 0-4.096V range ONLY, I/K are the fast axes --
-    # note the positive offset, this card can't go negative):
+    # note the positive offset, this card can't go negative; unaffected by
+    # the card-37 firmware update, still the original SIGNAL_DAC_4CH):
     python tools/asi_tiger_singleaxis_test.py --port COM4 --card-addr 34 --axis I \\
         --pattern sawtooth --amplitude 1.0 --offset 2.0 --frequency 50 --duration 15 --max-volts 4.096
 
@@ -71,6 +86,11 @@ def main():
     parser.add_argument("--baudrate", type=int, default=115200)
     parser.add_argument("--card-addr", type=int, required=True, help="e.g. 37")
     parser.add_argument("--axis", required=True, help="e.g. A")
+    parser.add_argument("--units-per-volt", type=float, default=4000 / 10.24,
+                         help="Raw device units per volt for SAA/SAO. Default (~390.625) matches "
+                              "ASI's new TGGALVO firmware on card 37. Pass 1000.0 for the original "
+                              "SIGNAL_DAC_4CH firmware (still on the ETL/laser cards, and on card 37 "
+                              "if not yet reflashed).")
     parser.add_argument("--pattern", choices=list(PATTERNS), default="sawtooth")
     parser.add_argument("--amplitude", type=float, default=1.0, help="Peak-to-peak amplitude, volts")
     parser.add_argument("--offset", type=float, default=0.0, help="Center offset, volts")
@@ -87,6 +107,8 @@ def main():
     swing_hi = args.offset + args.amplitude / 2
 
     print(f"Pattern: {args.pattern}")
+    print(f"units_per_volt: {args.units_per_volt:.4f} "
+          f"({'new TGGALVO firmware' if abs(args.units_per_volt - 1000.0) > 1 else 'original SIGNAL_DAC_4CH firmware'})")
     print(f"Amplitude: {args.amplitude:.3f} Vpp, offset: {args.offset:+.3f} V "
           f"-> swings between {swing_lo:+.3f} V and {swing_hi:+.3f} V")
     print(f"Frequency: {args.frequency:.2f} Hz (period {period_ms:.2f} ms)")
@@ -120,10 +142,13 @@ def main():
     saw = None
     try:
         tiger.connect()
-        print(f"\nConnected. Zeroing axis {args.axis} on card {args.card_addr} first...")
-        tiger.send_command(f"M {args.axis}=0", card_addr=args.card_addr)
-
-        saw = SingleAxisWaveform(tiger, card_addr=args.card_addr, axis=args.axis)
+        print(f"\nConnected. Defensively stopping any leftover single-axis mode on {args.axis} "
+              f"and zeroing (plain M=0 alone does NOT work if the axis is already in single-axis "
+              f"mode from a previous run -- confirmed on real hardware, see "
+              f"SingleAxisWaveform.stop()'s docstring)...")
+        saw = SingleAxisWaveform(tiger, card_addr=args.card_addr, axis=args.axis,
+                                  units_per_volt=args.units_per_volt)
+        saw.stop_and_zero()
 
         print("Configuring single-axis waveform (SAA/SAO/SAF/SAP) -- this is the real test...")
         try:
@@ -135,10 +160,10 @@ def main():
             )
         except TigerError as exc:
             print(f"\nERROR configuring single-axis mode: {exc}")
-            print("This most likely means your card's firmware does NOT implement the "
-                  "SINGLEAXIS_FUNCTION module (ASI's docs describe it for 'MicroMirror' "
-                  "cards specifically, and this hasn't been confirmed for SIGNAL_DAC_4CH). "
-                  "Fall back to the software-timed WaveformStreamer approach instead.")
+            print("Single-axis function is confirmed working on this rack's firmware (galvo tested "
+                  "successfully) -- this error more likely means a wrong --card-addr/--axis, or an "
+                  "axis-specific issue, rather than the module being unavailable. Double-check the "
+                  "card address and axis letter.")
             saw = None  # nothing to stop/clean up -- configure() never succeeded
             return
         print("Configured successfully (':A' reply) -- this firmware module IS available on this card.")
@@ -156,13 +181,9 @@ def main():
         if saw is not None:
             print("Stopping waveform (SAM=0) and zeroing output...")
             try:
-                saw.stop()
+                saw.stop_and_zero()
             except Exception as exc:
-                print(f"WARNING: could not stop single-axis mode: {exc}")
-            try:
-                tiger.send_command(f"M {args.axis}=0", card_addr=args.card_addr)
-            except Exception as exc:
-                print(f"WARNING: could not zero axis: {exc}")
+                print(f"WARNING: could not stop/zero single-axis mode: {exc}")
         if tiger.is_connected:
             tiger.disconnect()
             print("Disconnected.")

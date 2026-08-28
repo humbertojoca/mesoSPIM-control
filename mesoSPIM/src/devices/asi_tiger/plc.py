@@ -379,6 +379,32 @@ class PLCCard:
         """
         self.configure_io(backplane_addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=source_addr)
 
+    def fan_out_trigger(self, source_addr: int, output_addrs):
+        """
+        Route ONE signal onto MULTIPLE physical outputs simultaneously --
+        e.g. a single PLC-generated pulse feeding both a camera's
+        external trigger input (a BNC) AND a DAC axis's backplane
+        trigger-in line at once, so both branches share the exact same
+        output transition rather than one relaying/re-deriving from the
+        other. See the "shared trigger source" discussion in
+        PATCHNOTES_ASI_TIGER.md for why this matters: two branches fed
+        from the same edge have no timing uncertainty RELATIVE TO EACH
+        OTHER, even though each branch's own absolute response latency
+        (camera trigger-to-exposure, DAC trigger-to-ramp) still exists
+        independently.
+
+        source_addr: the trigger source -- typically a cell you pulse
+                     from the host (e.g. via set_cell_state()), or an
+                     external input.
+        output_addrs: iterable of physical output addresses to drive
+                      from source_addr simultaneously -- mix bnc_addr()
+                      (e.g. camera trigger) and
+                      asi_tiger.singleaxis.trigger_in_backplane_addr()
+                      (e.g. an armed DAC axis) freely.
+        """
+        for addr in output_addrs:
+            self.configure_io(addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=source_addr)
+
     def configure_shutter_gate(
         self,
         trigger_source_addr: int,
