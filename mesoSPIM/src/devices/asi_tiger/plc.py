@@ -219,6 +219,38 @@ class PLCCard:
         """Load one of ASI's built-in card presets (see PLC manual Tables 4-5)."""
         self.tiger.send_command(f"CCA X={preset_num}", card_addr=self.card_addr)
 
+    def reset_all_cells_and_io(self):
+        """
+        Unconditionally resets EVERY logic cell (1-16) to a harmless
+        constant-0 type, and EVERY physical I/O (BNC 1-8, backplane 0-7)
+        to IO_TYPE_INPUT -- regardless of what THIS PLCCard instance
+        itself configured.
+
+        This is different from safe_all_outputs(): that method only
+        touches what this session's _output_addrs tracking set knows
+        about (i.e. what this specific instance configured as an
+        output), so it can't clean up leftover state from a DIFFERENT
+        prior session/script/instance -- exactly the gap that caused a
+        BNC to come back as an output after a real controller reset,
+        traced to an earlier SS Z that saved whatever was live at the
+        time, including cell config no session's tracking set knew
+        about. This method has no such blind spot -- it touches every
+        possible address regardless of history.
+
+        Use this to establish a genuinely clean baseline BEFORE calling
+        save() -- otherwise SS Z persists whatever happens to be live,
+        cells included. This is deliberate and comprehensive: it WILL
+        disrupt any currently running acquisition/logic on this card.
+        Confirm nothing else depends on the current PLC state first.
+        """
+        for cell in range(1, 17):
+            self.configure_cell(cell, "constant", config=0)
+        for bnc in range(1, 9):
+            self.configure_io(bnc_addr(bnc), IO_TYPE_INPUT)
+        for bp in range(8):
+            self.configure_io(backplane_addr(bp), IO_TYPE_INPUT)
+        self._output_addrs.clear()
+
     def clear_state(self):
         """
         Resets stateful cells' STORED VALUE (a flip-flop's current output
@@ -280,7 +312,42 @@ class PLCCard:
             self.configure_cell(cell, "constant", config=0)
 
     def save(self):
-        """Persist cell config, I/O config, and trigger source to non-volatile memory."""
+        """
+        Persist cell config, I/O config, and trigger source to
+        non-volatile memory (SS Z) -- CONFIRMED ON REAL HARDWARE this
+        survives an actual controller reset/power cycle (not just a
+        reconnected serial port -- that's a separate, much weaker kind
+        of persistence covered by the safe_all_outputs()/clear_state()
+        pattern used elsewhere in this module).
+
+        CAUTION -- this saves the CARD'S ENTIRE CURRENT LIVE
+        CONFIGURATION, not just whatever you were focused on changing.
+        If any other cell/IO config happens to be live at the moment you
+        call this (leftover test config, a different script's setup,
+        etc.), that gets baked into the new power-on default too,
+        possibly unintentionally and hard to notice until it resurfaces
+        after some future reset. Confirmed as a real footgun: BNC I/O
+        type reverted to a stale OUTPUT default after a real controller
+        reset, traced to an earlier SS Z call that saved that state
+        before anyone noticed it needed to be INPUT.
+
+        Recommended safe pattern before calling this: clear_state() (or
+        even better, safe_all_outputs() to release any live outputs)
+        first, then explicitly (re)configure ONLY what you actually want
+        persisted, THEN call save() -- so what gets written to
+        non-volatile memory is deliberate, not whatever happened to be
+        live at the time.
+
+        Note the software-level defensive-reset pattern used in
+        asi_tiger_galvo_etl_demo.py (forcing the trigger BNC to
+        IO_TYPE_INPUT at the start of every run) does NOT depend on this
+        at all -- it self-heals the live config every run regardless of
+        the saved default, which is why that script kept working
+        correctly even before this was traced to a stale saved default.
+        save() is for making other tools/manual sessions against this
+        controller start from a sane default, not a substitute for that
+        defensive pattern.
+        """
         self.tiger.send_command("SS Z", card_addr=self.card_addr)
 
     def read_cell_outputs(self) -> int:
@@ -440,6 +507,205 @@ class PLCCard:
         self.configure_io(bnc_addr(shutter_bnc), IO_TYPE_INPUT)
         self.configure_cell(enable_cell, "constant", config=0)
         self.configure_cell(gate_cell, "constant", config=0)
+
+    def configure_pulse_pass_through_counter_single(
+        self,
+        pulse_in_addr: int,
+        pulse_out_bnc: int,
+        n_pulses: int,
+        cells=(1, 2, 3, 4, 5),
+    ):
+        """
+        Same behavior as configure_pulse_pass_through_counter() -- pass
+        an incoming pulse train through unchanged for exactly n_pulses,
+        then block until reset_pulse_pass_through_counter() is called --
+        but using a SINGLE one-shot counter instead of two cascaded ones.
+
+        Use this instead of the two-counter (n_inner*n_outer) version
+        whenever n_pulses fits in one 16-bit one-shot (up to 65535),
+        which covers realistic Z-stack plane counts with room to spare.
+        The two-counter version exists to reach totals beyond 65535 by
+        multiplying two 16-bit counters together, but that comes at a
+        real cost: since BOTH factors must be >= 2 (a one-shot's
+        duration=0 never fires -- see below), n_inner*n_outer cannot
+        represent N=1, N=2, N=3, or any PRIME N (5, 7, 11, 13, ...) --
+        there's no way to factor a prime into two integers both >= 2.
+        A single counter only excludes N=1, not primes -- a
+        meaningfully smaller limitation, and the right choice whenever
+        the range fits.
+
+        This is the SAME cell 2 (inner counter) from
+        configure_pulse_pass_through_counter(), with the now-redundant
+        outer-counter stage removed and the latch flop wired directly
+        to this counter's own falling edge instead of an outer
+        counter's. The counter cell's own logic is unchanged from the
+        two-counter version -- only the now-unnecessary second stage is
+        removed.
+
+        CONSTRAINT (same reason as the two-counter version): n_pulses
+        must be >= 2 -- a one-shot's documented behavior for duration=0
+        (n_pulses=1) is "output never goes high," which breaks the
+        counting logic rather than blocking after 1 pulse.
+
+        pulse_in_addr: address of the incoming pulse (e.g. bnc_addr(1)
+                       or a backplane trigger address).
+        pulse_out_bnc: BNC number (1-8) for the gated output.
+        cells: which 5 cells to use, in role order (initialize, count,
+               latch, delay, output-AND) -- defaults 1-5.
+        """
+        if n_pulses < 2:
+            raise ValueError(
+                f"n_pulses must be >= 2 (one-shot duration=0 never fires) -- got n_pulses={n_pulses}"
+            )
+        c_init, c_count, c_latch, c_delay, c_and = cells
+
+        # cell 1: initialize/reset flag -- constant, held low during normal operation
+        self.configure_cell(c_init, "constant", config=CONST_LOW)
+
+        # cell 2: count -- one-shot (NRT), high for n_pulses then low.
+        # Trigger and clock are the SAME signal (the incoming pulse's rising
+        # edge); the clock input on the evaluation cycle when the trigger
+        # fires is documented as ignored, so config=n_pulses-1 additional
+        # edges are what's actually counted after the triggering one.
+        self.configure_cell(
+            c_count, "one_shot", config=n_pulses - 1,
+            inputs={"a": rising_edge(pulse_in_addr), "b": rising_edge(pulse_in_addr), "c": cell_addr(c_init)},
+        )
+
+        # cell 3: latch flop -- latches high the first time the count is exhausted
+        self.configure_cell(
+            c_latch, "d_flop",
+            inputs={"a": CONST_HIGH, "b": falling_edge(cell_addr(c_count)), "c": cell_addr(c_init)},
+        )
+
+        # cell 4: delay flop -- delays the stop signal by one pulse-in cycle so the
+        # FINAL pulse still makes it through the output AND gate below
+        self.configure_cell(
+            c_delay, "d_flop",
+            inputs={"a": cell_addr(c_latch), "b": falling_edge(pulse_in_addr), "c": cell_addr(c_init)},
+        )
+
+        # cell 5: output AND gate -- passes pulse_in through while not yet latched-stopped
+        self.configure_cell(
+            c_and, "and2",
+            inputs={"a": pulse_in_addr, "b": inverted(cell_addr(c_delay))},
+        )
+
+        self.configure_io(bnc_addr(pulse_out_bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=cell_addr(c_and))
+        if 33 <= pulse_in_addr <= 40:
+            self.configure_io(pulse_in_addr, IO_TYPE_INPUT)
+
+    def configure_pulse_pass_through_counter(
+        self,
+        pulse_in_addr: int,
+        pulse_out_bnc: int,
+        n_inner: int,
+        n_outer: int,
+        cells=(1, 2, 3, 4, 5, 6),
+    ):
+        """
+        Passes an incoming pulse train through unchanged for exactly
+        n_inner * n_outer pulses, then blocks it, until
+        reset_pulse_pass_through_counter() is called.
+
+        FAITHFUL PORT of ASI's own documented, customer-tested example --
+        "Pass through pulse N*M times" on the TGPLC wiki page ("A
+        customer had an external pulse that they wanted to pass through
+        a set number of times and then disable the pass-through"). This
+        is NOT independently designed sequential logic -- every cell
+        role, address, and edge/invert combination below matches ASI's
+        published Beanshell script exactly (cross-checked the composite
+        edge/invert addresses -- e.g. falling_edge(cell) == their
+        "addrEdge+addrInvert+addrCell" -- against their literal example
+        values before using them here).
+
+        Splitting the total count into two cascaded one-shots (rather
+        than one) is ASI's own design, not an arbitrary choice here --
+        it lets the total reach n_inner * n_outer up to ~65535^2, far
+        beyond a single one-shot's 65535-pulse limit.
+
+        CONSTRAINT (from how a one-shot's duration config works -- see
+        command:sam/CCA Z docs: "If the duration is set to 0 then the
+        output will never go high"): BOTH n_inner and n_outer must be
+        >= 2, since each one-shot's config is (n-1), and a config of 0
+        breaks that cell's counting entirely. For small or prime totals
+        that can't be factored this way, pick a decomposition with some
+        slack (e.g. n_inner=2 and a slightly larger n_outer) rather than
+        an exact minimal factorization -- see PATCHNOTES for a discussion
+        of a possible single-stage simplification for small N, which is
+        NOT part of this faithful port and would need its own separate
+        verification before trusting it.
+
+        pulse_in_addr: address of the incoming pulse (e.g. bnc_addr(1)
+                       or a backplane trigger address).
+        pulse_out_bnc: BNC number (1-8) for the gated output.
+        cells: which 6 cells to use, in ASI's documented role order
+               (initialize, inner-count, outer-count, latch, delay,
+               output-AND) -- defaults match their example (1-6).
+        """
+        if n_inner < 2 or n_outer < 2:
+            raise ValueError(
+                f"n_inner and n_outer must both be >= 2 (one-shot duration=0 never fires) -- "
+                f"got n_inner={n_inner}, n_outer={n_outer}"
+            )
+        c_init, c_inner, c_outer, c_latch, c_delay, c_and = cells
+
+        # cell 1: initialize/reset flag -- constant, held low during normal operation
+        self.configure_cell(c_init, "constant", config=CONST_LOW)
+
+        # cell 2: inner count -- one-shot (NRT), high for n_inner pulses then low
+        self.configure_cell(
+            c_inner, "one_shot", config=n_inner - 1,
+            inputs={"a": rising_edge(pulse_in_addr), "b": rising_edge(pulse_in_addr), "c": cell_addr(c_init)},
+        )
+
+        # cell 3: outer count -- one-shot (NRT), clocked by inner count's falling edge
+        self.configure_cell(
+            c_outer, "one_shot", config=n_outer - 1,
+            inputs={"a": falling_edge(cell_addr(c_inner)), "b": falling_edge(cell_addr(c_inner)), "c": cell_addr(c_init)},
+        )
+
+        # cell 4: latch flop -- latches high the first time the full count is exhausted
+        self.configure_cell(
+            c_latch, "d_flop",
+            inputs={"a": CONST_HIGH, "b": falling_edge(cell_addr(c_outer)), "c": cell_addr(c_init)},
+        )
+
+        # cell 5: delay flop -- delays the stop signal by one pulse-in cycle so the
+        # FINAL pulse still makes it through the output AND gate below
+        self.configure_cell(
+            c_delay, "d_flop",
+            inputs={"a": cell_addr(c_latch), "b": falling_edge(pulse_in_addr), "c": cell_addr(c_init)},
+        )
+
+        # cell 6: output AND gate -- passes pulse_in through while not yet latched-stopped
+        self.configure_cell(
+            c_and, "and2",
+            inputs={"a": pulse_in_addr, "b": inverted(cell_addr(c_delay))},
+        )
+
+        self.configure_io(bnc_addr(pulse_out_bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=cell_addr(c_and))
+        # Ensure the input side is actually configured as an input if it's a BNC
+        # (a no-op/harmless if pulse_in_addr is a backplane address instead)
+        if 33 <= pulse_in_addr <= 40:
+            self.configure_io(pulse_in_addr, IO_TYPE_INPUT)
+
+    def reset_pulse_pass_through_counter(self, init_cell: int = 1):
+        """
+        Re-arms configure_pulse_pass_through_counter() for another full
+        count -- matches ASI's documented reset mechanism exactly: pulse
+        the "initialize" cell's constant value low -> high -> low. Their
+        script does this with 3 back-to-back raw CCA Z commands on the
+        SAME already-selected cell (no re-selecting, no re-setting cell
+        type in between) -- replicated here the same way rather than via
+        3 separate configure_cell() calls, since re-sending CCA Y (even
+        to the same type) is documented to clear the cell's prior
+        config/state, which isn't the effect wanted for a clean pulse.
+        """
+        self.tiger.send_command(f"M E={cell_addr(init_cell)}", card_addr=self.card_addr)
+        self.tiger.send_command(f"CCA Z={CONST_LOW}", card_addr=self.card_addr)
+        self.tiger.send_command(f"CCA Z={CONST_HIGH}", card_addr=self.card_addr)
+        self.tiger.send_command(f"CCA Z={CONST_LOW}", card_addr=self.card_addr)
 
     def set_cell_state(self, cell_num: int, high: bool):
         """Directly set a stateful cell's (flip-flop) output (CCA F)."""

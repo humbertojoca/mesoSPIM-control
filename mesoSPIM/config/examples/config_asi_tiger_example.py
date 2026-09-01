@@ -67,9 +67,19 @@ asi_dac_parameters = {
     # Card 4 (H/I/J/K): 0 to 4.096V, 400Hz LPF, intended for Tunable Lens
     #   control (into an EL-E-4 driver). Still running the ORIGINAL
     #   SIGNAL_DAC_4CH firmware (units_per_volt defaults to 1000, the
-    #   standard millivolt convention -- no change needed here). Axes I
-    #   and K are the guaranteed-fastest here, hence etl_l/etl_r map to
-    #   I/K.
+    #   standard millivolt convention -- no change needed here).
+    #
+    #   ASI's docs say I and K are the guaranteed-fastest axes on this
+    #   card. CONFIRMED ON REAL HARDWARE, K specifically has a trigger
+    #   fault on this card: with SAM=2 triggered externally, K only
+    #   responds to every OTHER pulse (1st/3rd fire, 2nd/4th don't) --
+    #   tested from a fresh controller reset with several seconds
+    #   between manually-sent pulses (ruling out re-arm timing), correct
+    #   jumper installed and verified. H, I, and J were all confirmed
+    #   working correctly under the identical protocol -- this looks
+    #   isolated to K's own trigger circuit on this specific card, not
+    #   the general architecture. Using J here instead of K until ASI
+    #   can diagnose it (I is the primary channel; J substitutes for K).
     #
     # max_step_v on all four: ASI's own warning -- "Sudden jumps in
     # command voltage that are faster then the inertial moment of the
@@ -79,6 +89,7 @@ asi_dac_parameters = {
     # absorb. 0.5V/0.2V are conservative STARTING defaults, not numbers
     # ASI verified for your specific galvo/lens -- tune down if you have
     # datasheet numbers for actual safe slew rates, and test cautiously.
+    #
     'galvo_etl_channels': [
         {'name': 'galvo_l', 'card_addr': 37, 'axis': 'A', 'range_code': 6,
          'safety_limit_mv': 10000, 'max_step_v': 0.5,
@@ -88,8 +99,8 @@ asi_dac_parameters = {
          'units_per_volt': 4000 / 10.24},
         {'name': 'etl_l',   'card_addr': 34, 'axis': 'I', 'range_code': 1,
          'max_step_v': 0.2},  # original firmware -- default units_per_volt (1000) is correct
-        {'name': 'etl_r',   'card_addr': 34, 'axis': 'K', 'range_code': 1,
-         'max_step_v': 0.2},
+        {'name': 'etl_r',   'card_addr': 34, 'axis': 'J', 'range_code': 1,
+         'max_step_v': 0.2},  # J, NOT K -- see the K trigger fault note above
     ],
 
     # ------------------------------------------------------------------

@@ -125,7 +125,7 @@ class TigerController:
             self._ser.reset_input_buffer()
             self._ser.write((full_cmd + "\r").encode("ascii"))
             self._ser.flush()
-            raw = self._ser.read_until(b"\r\n")
+            raw = self._read_reply_lenient()
 
         if not raw:
             raise TimeoutError(f"No reply from controller for: {full_cmd!r}")
@@ -143,3 +143,27 @@ class TigerController:
             reply = reply[2:].strip()
 
         return reply
+
+    def _read_reply_lenient(self) -> bytes:
+        """
+        Polls for a reply, accepting either '\\r\\n' OR a bare '\\r' as a
+        valid terminator (pyserial's read_until only accepts an exact
+        byte sequence match). Adopted after a separate diagnostic script
+        (asi_trigger_test.py) found this necessary for reliable framing
+        on some command types -- a strict '\\r\\n'-only read_until would
+        still eventually return the right data on a bare-'\\r' reply
+        (pyserial returns whatever's buffered once the port timeout
+        elapses), just after stalling for the full per-command timeout
+        first. This returns as soon as either terminator is seen.
+        """
+        end_time = time.time() + self._timeout
+        buf = b""
+        while time.time() < end_time:
+            chunk = self._ser.read(self._ser.in_waiting or 1)
+            if chunk:
+                buf += chunk
+                if buf.endswith(b"\r\n") or buf.endswith(b"\r"):
+                    break
+            else:
+                time.sleep(0.01)
+        return buf

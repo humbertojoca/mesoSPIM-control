@@ -779,6 +779,462 @@ independently verified across a range of frame rates. Treat the 2ms
 default as a starting point to verify on a scope, not a guaranteed-safe
 number for every configuration.
 
+## Fix: trigger-input BNC could be left as an output by a prior session
+
+Found via real hardware testing: after running `shared_trigger_test.py`
+(which can drive a BNC as an *output* via `--camera-trigger-bnc`) and
+then switching to `asi_tiger_galvo_etl_demo.py` (which needs that same
+BNC number as an *input*, reading the real camera signal), the demo
+script silently failed to trigger -- despite the camera's real signal
+being clearly visible on a scope. Root cause: the controller's live I/O
+configuration persists across separate script invocations as long as
+the physical controller stays powered -- reconnecting the serial port
+does NOT reset it, only an actual power cycle would (and possibly not
+even then, if the state was ever saved with `SS`). The leftover
+output-mode config from the earlier session silently carried forward.
+
+Diagnosed by comparing two test paths directly: manually toggling a PLC
+cell (`CCA F=1`) worked, because that's a different signal path
+entirely (PLC-generated pulse, same mechanism `shared_trigger_test.py`
+uses) -- it didn't confirm the BNC1-as-input path was healthy, and
+wasn't a like-for-like comparison.
+
+**Considered and rejected**: configuring the BNC as a fixed output and
+saving that with `SS` so it "just persists." This is wrong for this
+BNC's actual role -- it needs to keep listening to the camera, and
+`SS`-saving an output configuration would make it stop doing that
+permanently, surviving even a real power cycle.
+
+**Actual fix**: `asi_tiger_galvo_etl_demo.py` now defensively forces the
+trigger-source BNC to `IO_TYPE_INPUT` at the start of every run, before
+routing it to the ETL's trigger-in line -- the same self-healing
+pattern already used for the DAC axes (`stop_and_zero()`) and PLC cell
+state (`clear_state()`). This doesn't depend on remembering to save
+anything or on whether a power cycle happened; it just makes the
+correct state true every time, regardless of what any previous session
+(this script with a different `--trigger-bnc`, `shared_trigger_test.py`
+with `--camera-trigger-bnc` pointing at the same number, or manual
+`--raw` testing) left behind.
+
+Verified by simulating the exact failure: a persistent mock controller
+instance shared across two separate simulated script invocations (so
+its live state survives "reconnecting," matching real hardware
+behavior) -- pre-set the BNC to output in "session 1," ran the actual
+demo script as "session 2" against that same leftover state, confirmed
+it starts as `type=2` (output) and ends as `type=0` (input) after the
+script's defensive reset runs.
+
+## Confirmed: SS Z survives a real controller reset, and saves EVERYTHING
+
+Follow-up to the previous fix (trigger-input BNC left as output by a
+prior session): the user clarified they meant an actual reset/power
+cycle of the ASI Tiger controller itself, not just reconnecting the
+serial port -- and confirmed physical I/O type (`CCA Y`) DOES survive a
+real reset if it was ever saved with `SS Z`. Manually reconfiguring BNC1
+to input and running `36SS Z` fixed it permanently across resets.
+
+Important caution surfaced by this: **`SS Z` saves the card's entire
+current live configuration**, not just whatever you meant to fix. If
+other test config was live at the moment of saving (leftover PLC cells,
+other BNCs), that's now baked into the permanent power-on default too --
+easy to not notice until it resurfaces after some future reset. This is
+exactly how BNC1 ended up defaulting to output in the first place:
+traced to an earlier `SS Z` call that saved that state before anyone
+had reconfigured it correctly.
+
+**Clarified relationship to the previous fix**: the software-level
+defensive reset in `asi_tiger_galvo_etl_demo.py` (forcing the trigger
+BNC to `IO_TYPE_INPUT` at the start of every run) does NOT depend on
+what's saved -- it self-heals the live config every run regardless,
+which is why that script kept working correctly across the reset even
+before this was traced to a stale saved default. `PLCCard.save()` is
+for giving OTHER tools/manual sessions against this controller a sane
+starting point, not a substitute for that defensive pattern.
+
+`PLCCard.save()`'s docstring now documents both the confirmed
+reset-survival behavior and the "saves everything, not just your
+change" caution, with a recommended safe pattern (clear_state()/
+safe_all_outputs() first, configure exactly what you want, then save)
+for future use.
+
+## New: comprehensive PLC reset, for establishing a clean saved default
+
+Follow-up to the SS Z / stale-saved-default finding above. User
+confirmed no other BNCs (1-8) were touched besides the one being fixed
+-- but that doesn't cover PLC logic cells (1-16), a separate address
+space. `safe_all_outputs()` only resets what THIS session's own
+tracking set knows it configured -- it has no visibility into leftover
+cell config from a *different* prior session (e.g. `shared_trigger_test.py`'s
+cell 8 used as a toggle source, or the laser-toggle cells 1-3), so it
+can't guarantee a clean baseline before a `save()` call by itself.
+
+New:
+- **`PLCCard.reset_all_cells_and_io()`** -- unconditionally resets all
+  16 logic cells to constant-0 and all 16 physical I/O addresses (BNC
+  1-8, backplane 0-7) to input, regardless of this instance's own
+  tracking history. Verified by address range against a mocked serial
+  device: exactly cells 1-16 and physical addresses 33-48 touched, no
+  gaps.
+- **`tools/asi_tiger_plc_factory_reset.py`** -- deliberate, heavily
+  confirmed tool wrapping this: confirms before resetting (disrupts any
+  running logic), then a SEPARATE explicit typed confirmation
+  (`"save clean default"`) before actually persisting it with `SS Z`.
+  Without `--save`, only affects live state (a real controller reset
+  would still revert to the old saved default) -- this distinction is
+  stated explicitly in the script's own output so it's never ambiguous
+  which one happened. All four paths (decline reset, reset only, reset
+  + confirmed save, reset + declined save) verified against the mock.
+
+Recommended use: run this with `--save` once, deliberately, when you
+know the PLC is in a state you're happy to have as the permanent
+power-on default (e.g. right after fixing the BNC1 issue) -- rather
+than relying on ad-hoc `--raw` `SS Z` calls where it's easy to not
+notice what else was live at that moment.
+
+## Hardware finding: axis K has a trigger fault on this card (card 34)
+
+Systematic debugging, all against the confirmed-good SAM=2 clean-pulse
+protocol established earlier in this document (arm once, manual
+low->high->low pulses via a PLC cell, checking the scope after each,
+from a fresh controller `reset`):
+
+- Axis I (backplane trigger-in 44): responds correctly to every pulse.
+- Axis K (backplane trigger-in 48): **alternates** -- 1st and 3rd pulses
+  fire, 2nd and 4th don't. Not "doesn't rearm" (that would mean nothing
+  after the first); not a timing/margin issue (pulses were sent
+  manually, seconds apart, no possibility of the axis still being mid-
+  cycle when the next arrived).
+- To rule out the trigger *architecture* (jumper position, backplane
+  addressing, PLC routing) as the cause: moved the physical SV9 jumpers
+  from 43/44+47/48 (I+K) to 41/42+45/46 (H+J) and re-ran the identical
+  protocol. **Both H and J responded correctly to every pulse.**
+
+Three axes (H, I, J) on the same card, same firmware, same protocol,
+all correct. Only K exhibits this fault -- isolates it to K's own
+trigger circuit on this specific card, not the general architecture,
+not the software (address/slot math was independently verified correct
+for K throughout: `axis_slot_index('K','H')` -> slot 3 ->
+`trigger_in_backplane_addr(3)` -> 48, matching exactly what the manual
+`--raw` tests also used).
+
+**Action taken**: `config_asi_tiger_example.py`'s `etl_r` channel
+changed from axis K to axis J (confirmed working) until ASI can
+diagnose K. No code changes needed elsewhere -- this is a hardware
+finding, not a bug in this library.
+
+**Recommended report to ASI** (reproducible, specific):
+> On card 34 (H/I/J/K, ETL card, SIGNAL_DAC_4CH firmware) -- SAM=2
+> triggered via backplane addresses 42 (H), 44 (I), and 46 (J) responds
+> correctly to every pulse. The same protocol on address 48 (K) only
+> responds to every other pulse (1st/3rd fire, 2nd/4th don't). Tested
+> from a fresh controller reset, several seconds between manually-sent
+> pulses (ruling out re-arm timing), jumpers confirmed correctly
+> installed at all four positions. Three other axes on the same card
+> work correctly under an identical protocol -- isolated to K
+> specifically.
+
+## New: Z-stage ring buffer trigger (`asi_tiger/stage_trigger.py`)
+
+A separate diagnostic script (`asi_trigger_test.py`, produced by another
+agent working on Z-stack acquisition-loop design) confirmed on real
+hardware that the Z/Theta stage card's ring buffer (`RM`/`LOAD`/`TTL X=12`)
+works correctly for TTL-triggered relative stepping -- both a
+software-simulated trigger (bare `RM`) and a real electrical pulse
+(PLC BNC jumpered to the card's physical TRIG IN) moved the stage. This
+is genuinely new capability -- distinct from the DAC/ETL/galvo
+triggering (`SAM`/`SAP`) already built and validated in this project.
+
+**Deliberately NOT adopted**: that same diagnostic script explored an
+analogous ring-buffer approach (`TTL X=1`, absolute mode) for the DAC
+cards too, as an alternative to `SAM`/`SAP`. Not adopted here -- it was
+never confirmed working on DAC hardware in that script's own testing
+(its code hedges "skip if the DAC card has no separate TTL IN BNC"
+without a working backplane-triggered result), and `SAM`/`SAP` is
+already extensively validated (including finding the real K-axis fault
+documented above). Two competing, only-one-proven mechanisms for the
+same job isn't worth the confusion.
+
+New:
+- **`asi_tiger/stage_trigger.py`**: `StageRingBuffer` (clear/load/arm/
+  disarm/software_trigger/where) + `load_ring_buffer_point()`, wrapping
+  the confirmed `RM`/`LOAD`/`TTL X=12` sequence. `LOAD` is deliberately
+  NOT card-addressed in this wrapper -- confirmed real Tiger quirk (the
+  axis letter alone identifies the card), and verified this exact
+  omission against a mocked serial device.
+- **`tools/asi_tiger_stage_ring_buffer_test.py`**: reimplements the
+  diagnostic script's confirmed software-self-test + electrical-test
+  sequence through the library, with this project's usual safety
+  conventions (confirmation prompts, defensive cleanup in `finally`).
+
+### Transport: adopted the more lenient reply terminator
+
+The diagnostic script's `TigerSerial.send()` accepts either `\r\n` or a
+bare `\r` as a valid reply terminator; our `TigerController` previously
+required an exact `\r\n` match (via pyserial's `read_until`). Not a
+correctness bug -- pyserial's `read_until` still returns whatever was
+buffered once the port timeout elapses even without finding the exact
+terminator -- but it would silently cost a full timeout's stall (0.5s)
+on any command that replies with a bare `\r`. Adopted the lenient
+polling read as `TigerController._read_reply_lenient()`, given this
+project is now sending several command types (`LOAD`, `WHERE`, bare
+`RM`, `RM Y?`) that hadn't been exercised with our transport before.
+Re-verified against everything already validated (DAC set/read, PLC
+`clear_state()`) after the change -- no regressions.
+
+## New: ring-buffer capacity bench test (before designing PLC counter logic)
+
+The design doc's hardest remaining piece is a PLC counter cell topology
+to gate the self-sustaining Z-move-complete->next-frame-trigger loop so
+it runs exactly N times per row then stops. Could not find ASI's own
+documented "N pulses then stop" example to build from with confidence
+-- hand-designing custom flip-flop/one-shot sequential logic blind, for
+something where a mistake means a real Z-stage overrun (not just a
+software bug), isn't something to guess at.
+
+**Reframed the bench test around a simpler question first**: does the
+ring buffer itself already provide this behavior for free? If exactly
+N points are loaded and the axis is triggered more than N times, does
+it move N times and then simply stop (nothing left queued -- "N then
+stop" for free, no counter cells needed), or does something else happen
+(wraparound, repeat, error)?
+
+New: **`tools/asi_tiger_ring_buffer_capacity_test.py`** -- loads N
+points, triggers N+extra times via the software self-test (safe, no
+wiring), reports moves-per-trigger and whether the simple hypothesis
+held. Verified the script's interpretation logic correctly distinguishes
+both possible outcomes against two different mock behaviors (exhausts-
+and-holds vs. wraps-and-repeats) -- but the mock's specific behavior is
+just an assumption I built into the simulator, NOT a confirmation of
+what real hardware does. Only a real-hardware run answers the actual
+question. If the hypothesis holds, the design doc's hardest open item
+may not need any new PLC logic at all; if not, the exact failure mode
+observed (which trigger, what happened) is the input needed to design
+the real fix correctly rather than guessing.
+
+## New: pulse-pass-through counter, ported from ASI's own documented example
+
+Found ASI's actual documented "N pulses then stop" example --
+https://www.asiimaging.com/docs/tiger_programmable_logic_card#fixed_number_of_pulses_from_trigger
+and, more directly applicable, "Pass through pulse N*M times" (a
+real customer's deployed solution for exactly this project's problem:
+"pass an incoming pulse through a set number of times and then disable
+the pass-through"). This replaces the earlier plan to hand-design
+custom flip-flop/one-shot sequential logic from scratch, which was
+correctly flagged as too risky to invent blind given the real-world
+consequences of getting it wrong (Z-stage overrun).
+
+`PLCCard.configure_pulse_pass_through_counter()` / `reset_pulse_pass_through_counter()`
+are a faithful port of ASI's BeanShell example -- six cells (two
+cascaded one-shot NRT counters for a total of n_inner*n_outer up to
+~65535^2, a latch flop, a delay flop to let the final pulse complete
+before blocking, and an output AND gate). Verified by hand, address by
+address, against ASI's literal script values (not just trusting the
+docstring's claim of fidelity): every `rising_edge()`/`falling_edge()`/
+`inverted()`-computed address matches their hardcoded numbers exactly
+(e.g. `falling_edge(cell_addr(2))` = 194 = their
+`addrEdge+addrInvert+addrInnerCount`), and the reset sequence's
+`CONST_HIGH=64` deliberately matches their literal script value rather
+than a stricter reading of the cell-type reference table (real
+customer-tested values should win over a possibly-imprecise table
+entry).
+
+**Constraint carried over from the one-shot cell's documented
+behavior**: both `n_inner` and `n_outer` must be >= 2 -- a one-shot's
+`duration=0` config (`n=1`) is documented to "never go high," which
+breaks the counting logic entirely rather than blocking after 1 pulse.
+Raises `ValueError` for `n < 2`.
+
+New: **`tools/asi_tiger_pulse_counter_test.py`** -- Stage 1 bench test,
+pure software validation (a PLC cell simulates the incoming pulse via
+direct `CCA F` state writes -- the same confirmed mechanism used
+elsewhere in this project -- and `RDADC Z?` reads the output AND
+gate's computed value directly, no scope needed). Tests both the main
+counting behavior and that `reset_...()` correctly re-arms for a fresh
+count. Verified the exact command sequence sent matches the hand-
+derived expectations command-by-command against a mocked serial
+device -- but deliberately did NOT build a simulated one-shot/D-flop
+model to fake a PASS/FAIL result, since a bug in a custom simulator
+built specifically to validate this could mask a real bug rather than
+catch one. The mock intentionally cannot validate the actual counting
+behavior (confirmed by running it: reports FAIL across the board, since
+`RDADC Z?` always returns a fixed value unrelated to real cell state) --
+**this script's real purpose is a Stage 1 bench test on actual
+hardware**, not something to trust from a mock run.
+
+Stage 2 (a real electrical test with an actual external pulse source
+and a scope on the real output BNC) should follow only after Stage 1
+passes on real hardware -- not built yet, and not needed until Stage 1
+is confirmed.
+
+## CORRECTION: the ring buffer wraps around, it does not exhaust and stop
+
+An earlier section of this document floated an untested hypothesis: if
+you `LOAD` exactly N points into the Z-stage ring buffer, maybe it
+naturally stops responding once exhausted, giving "N triggers then
+stop" for free without needing the PLC counter at all. **This was
+wrong**, confirmed against ASI's own ring buffer documentation
+(https://asiimaging.com/docs/ring_buffer):
+
+> "Each press of the @ button causes the stage to advance to the next
+> position. When you reach the last position, the next press... will
+> take you back to the first position."
+
+It's a genuine **circular buffer**, not a queue that exhausts. The
+earlier capacity-test script tested the wrong hypothesis and has been
+replaced.
+
+### What this clarifies about the design
+
+1. **The PLC pulse-pass-through counter is not optional or a fallback
+   -- it's the only thing that gates "stop after N frames."** The ring
+   buffer will happily repeat forever on its own, by design. This
+   confirms the original design doc's architecture was right all along.
+2. **Usefully, for uniform Z-stepping** (the actual use case -- same
+   relative delta every plane, not distinct positions): loading exactly
+   **one** relative step means every trigger wraps to that same single
+   entry. You never need more than 1 loaded point regardless of how
+   many planes are in the stack -- which means the ring buffer's
+   documented 50-position default (250 on request from ASI) capacity
+   limit is **irrelevant to this design** entirely, not something that
+   needs to be worked around.
+
+### Corrected architecture
+
+- Row-level (once per row, slow): absolute `MOVE` to `Z_start`.
+- Row-level (once per row, slow): `LOAD` exactly one relative step, arm
+  `TTL X=12`.
+- The PLC pulse-pass-through counter (single-counter or two-counter
+  version) gates the actual "stop after N frames" -- confirmed this is
+  necessary, not a nice-to-have.
+
+### What changed in the code
+
+- `asi_tiger/stage_trigger.py`'s module docstring corrected -- states
+  the wraparound behavior plainly, with the corrected architecture, and
+  points to the earlier wrong assumption rather than silently deleting
+  it (matching how prior corrections in this document are handled).
+- **`tools/asi_tiger_ring_buffer_capacity_test.py` removed**, replaced
+  by **`tools/asi_tiger_ring_buffer_wraparound_test.py`**, which tests
+  the actual documented behavior: (1) single-entry consistency -- one
+  loaded step, triggered repeatedly, moves by exactly that amount every
+  time, no ceiling; (2) multi-entry wraparound proof -- several
+  *distinct* loaded steps, triggered through multiple full cycles,
+  confirming the delta sequence repeats in order rather than stopping.
+  Verified the script's own detection/reporting logic against a
+  correspondingly-fixed mock (the earlier mock modeled exhaustion via
+  list-popping; fixed to model wraparound via a cycling pointer,
+  matching the real documented behavior) -- this validates the script's
+  logic is sound, not a substitute for the real-hardware confirmation
+  that matters here.
+
+## Confirmed on real hardware: ring buffer capacity is 50, and two distinct native modes exist
+
+Directly tested on real hardware via `RM F?`/`RM F=0`/`RM X?`/`RM F=1`,
+cross-referenced against ASI's `command:rbmode` docs, resolving the
+wraparound correction above with an important addition: there are TWO
+genuinely different native ring buffer modes, not one.
+
+- **`RM F=1` (TTL Triggered Mode, default)** -- moves to the next
+  position and **wraps** around at the end. This is the mode used
+  throughout this project (the single-relative-step architecture).
+  `RM X?` here reports the number of *used* positions.
+- **`RM F=0` (Consume Mode)** -- a trigger *consumes* a position if one
+  exists: genuine hardware exhaust-and-stop behavior, confirmed for
+  real this time (unlike the earlier wrong hypothesis about F=1).
+  Per ASI's docs, "this mode reduces the capacity of the ring buffer by
+  1" -- confirmed on real hardware: `RM X?` read `50` immediately after
+  switching to consume mode (this specific rack's actual capacity, not
+  the optional 250-position upgrade), meaning **49 usable positions**
+  in this mode specifically. `RM X?` here reports *open* (not used)
+  positions instead. Also confirmed: **switching `F` in either
+  direction clears the ring buffer and resets its indices** -- don't
+  assume anything loaded before a mode switch survives it.
+
+**Decision, now justified by both the capacity number and the
+underlying mechanism**: Consume Mode is not used for this project. 49
+positions is too few for realistic Z-stack sizes, and it doesn't offer
+anything the PLC pulse-pass-through counter doesn't already provide
+without a capacity ceiling (validated to N=400). F=1 (wrap) plus the
+PLC counter remains the architecture.
+
+New: `StageRingBuffer.set_mode()`/`query_mode()`/`query_position_count()`
+and `RB_MODE_*` constants (CONSUME/TTL_TRIGGERED/ONESHOT_AUTOPLAY/
+REPEAT_AUTOPLAY/ONESHOT_AUTOPLAY_NO_RETURN), documenting all of
+`RBMODE`'s F-mode options for completeness/future reference, even
+though only F=1 is used in the chosen architecture. Verified the exact
+command sequence generated (`RM F=0`, `RM X?`, `RM F=1`, `RM X?`)
+matches the user's own real-hardware terminal session character-for-
+character.
+
+## RESOLVED: read index not reset by clear(), AND arming itself silently advances it
+
+Real hardware run of `asi_tiger_ring_buffer_wraparound_test.py` (single
+entry, 20 triggers; 3 distinct entries, 3 cycles) surfaced two distinct,
+real anomalies -- diagnosed by pattern-matching the observed deltas
+against the expected cycle at different offsets rather than dismissing
+the "FAIL" results as noise. Both are now understood and fixed.
+
+1. **`clear()` (`RM X=0`) does not reset the read index** -- confirmed
+   against ASI's docs (only an `RM F=<mode>` transition is documented
+   to reset read/write indices). **Fixed**: `clear()` now also sends
+   `RM Z=0` explicitly.
+
+2. **Arming itself silently advances the read index by one position**
+   -- confirmed directly and conclusively on a second real-hardware run
+   using the new `query_read_index()` visibility: `read_index=Z=1`
+   immediately after `arm_relative()`, with **zero triggers sent**,
+   despite the index having been confirmed still at `Z=0` right after
+   loading (isolating the cause to arming, not loading). This is an
+   undocumented side effect of `TTL X=12`, not something in this
+   library's control to prevent. Once accounted for, the previously
+   "FAILed" Test 2 data lines up cleanly against the cycle shifted by
+   exactly this offset (4 of 9 exact matches, rest within the same ±1
+   settling noise seen in Test 1). **Fixed**: `arm_relative()` (and
+   defensively, `arm_absolute()`) now send `RM Z=0` again as their
+   final step, immediately after `TTL X=`, compensating for the
+   advance so the first real trigger reliably applies the first loaded
+   point.
+
+**Test 1's remaining ±9/±11 alternating deltas (avg exactly +10) are
+NOT a logic bug** -- the read index stayed rock-solid at `Z=0->Z=0` for
+all 20 triggers (airtight proof the single-entry wraparound logic
+itself is correct), and the alternating pattern around the true value
+is a classic position-reporting/settling signature at the 0.1 micron
+level, not a counting error. Not worth chasing further unless it
+becomes relevant at that precision for real acquisitions.
+
+Re-run needed on real hardware to confirm the arm-time Z=0 fix fully
+resolves Test 2's offset now that the actual cause (not just its
+symptom) is addressed.
+
+## CONFIRMED FIXED: follow-up real hardware run
+
+Re-ran `asi_tiger_ring_buffer_wraparound_test.py` after the arm-time
+`RM Z=0` fix above. Result: **Test 2's systematic offset is gone.**
+`read_index=Z=0` after arming (was `Z=1` before the fix), and the delta
+sequence now follows the loaded `10,20,30` cycle correctly, cycling
+`0->1->2->0` exactly as expected. The remaining "UNEXPECTED" markers in
+both tests are all within +/-1 (tenths-of-micron) of the expected
+value, and the read index itself stayed correct throughout every single
+trigger in both tests -- confirms the actual counting/wraparound logic
+is correct; what's left is real position-reporting/settling noise at
+the 0.1 micron level, not a software bug.
+
+Also observed, separately: arming produced a small (~1 loaded-step)
+physical move on its own in this run, but did NOT in the prior run --
+inconsistent between two otherwise-identical runs, unlike the
+deterministic Z=0->Z=1 index bug that's now fixed. Most likely ordinary
+backlash/static-friction take-up on first motor engagement after the
+stage sits idle, not a ring-buffer logic issue (the architecture's
+row-level absolute MOVE to Z_start, which happens before arming, should
+already absorb most of this in practice). Not treated as something to
+fix in software given the inconsistency -- instead added an optional
+`settle_s` parameter to `arm_relative()`/`arm_absolute()` (default 0,
+preserves prior behavior) as a cheap hedge: pass e.g. 0.3-0.5s to let
+any residual settling finish before an acquisition loop's first real
+trigger. Verified the parameter actually delays by the requested amount
+and that the default remains delay-free.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level -- the only

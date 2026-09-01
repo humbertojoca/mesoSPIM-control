@@ -92,18 +92,18 @@ def main():
                               "original firmware represents as -10240..10240 (mV). Pass 1000.0 if "
                               "your card is still on the original SIGNAL_DAC_4CH firmware.")
     parser.add_argument("--galvo-pattern", choices=list(PATTERNS), default="triangle")
-    parser.add_argument("--galvo-amplitude", type=float, default=2.0, help="Vpp")
-    parser.add_argument("--galvo-offset", type=float, default=0.0, help="V")
-    parser.add_argument("--galvo-frequency", type=float, default=50.0, help="Hz")
-    parser.add_argument("--galvo-max-volts", type=float, default=10.0,
+    parser.add_argument("--galvo-amplitude", type=float, default=1.3, help="Vpp")
+    parser.add_argument("--galvo-offset", type=float, default=0.53, help="V")
+    parser.add_argument("--galvo-frequency", type=float, default=100.0, help="Hz")
+    parser.add_argument("--galvo-max-volts", type=float, default=5.0,
                          help="Safety bound -- ASI: limit galvo commands to +/-10.00V exactly")
 
     parser.add_argument("--etl-card-addr", type=int, default=34)
-    parser.add_argument("--etl-axis", default="I", help="ASI-confirmed fast axis on the ETL card")
+    parser.add_argument("--etl-axis", default="H", help="ASI-confirmed fast axis on the ETL card")
     parser.add_argument("--etl-pattern", choices=list(PATTERNS), default="sawtooth")
     parser.add_argument("--etl-card-first-axis", default="H", help="First axis letter on the ETL card (for slot math)")
-    parser.add_argument("--etl-amplitude", type=float, default=1.0, help="Vpp")
-    parser.add_argument("--etl-offset", type=float, default=2.0,
+    parser.add_argument("--etl-amplitude", type=float, default=0.38, help="Vpp")
+    parser.add_argument("--etl-offset", type=float, default=2.32,
                          help="V -- must be >= amplitude/2 since the ETL card is 0-4.096V only (unipolar)")
     parser.add_argument("--etl-max-volts", type=float, default=4.096, help="ETL/laser card hardware ceiling")
     parser.add_argument("--etl-period-ms", type=float, default=None,
@@ -259,6 +259,14 @@ def main():
 
         # --- PLC: route trigger BNC onto the ETL's backplane trigger-in line ---
         plc = PLCCard(tiger, card_addr=args.plc_card_addr, axis=args.plc_axis)
+        # Defensive reset, same reasoning as the DAC axis stop_and_zero() above: a previous
+        # session (this script with a different --trigger-bnc, or shared_trigger_test.py with
+        # --camera-trigger-bnc pointing at this same BNC) may have left this BNC configured as
+        # an OUTPUT. That state persists in the controller's live config across script runs --
+        # NOT reset by reconnecting the serial port, only by an actual power cycle (and possibly
+        # not even then, if it was ever saved with SS). Force it back to input before trusting
+        # it to read your camera's real trigger signal.
+        plc.configure_io(bnc_addr(args.trigger_bnc), IO_TYPE_INPUT)
         slot = axis_slot_index(args.etl_axis, args.etl_card_first_axis)
         trig_addr = trigger_in_backplane_addr(slot)
         plc.route_to_dac_trigger(trig_addr, source_addr=bnc_addr(args.trigger_bnc))
