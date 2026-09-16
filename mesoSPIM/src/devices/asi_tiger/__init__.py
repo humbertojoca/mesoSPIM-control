@@ -35,11 +35,14 @@ from .singleaxis import (
     enable_backplane_trigger_mode,
 )
 
+from .zstack_chain import configure_zstack_trigger_chain, ZStackTriggerChain
+
 from .stage_trigger import (
     StageRingBuffer, load_ring_buffer_point,
     TTL_MODE_DISARMED, TTL_MODE_ABSOLUTE, TTL_MODE_RELATIVE,
     RB_MODE_CONSUME, RB_MODE_TTL_TRIGGERED, RB_MODE_ONESHOT_AUTOPLAY,
     RB_MODE_REPEAT_AUTOPLAY, RB_MODE_ONESHOT_AUTOPLAY_NO_RETURN,
+    OUT0_MODE_LOW, OUT0_MODE_HIGH, OUT0_MODE_MOVE_COMPLETE,
 )
 
 __all__ = [
@@ -88,9 +91,14 @@ __all__ = [
     "TTL_MODE_DISARMED",
     "TTL_MODE_ABSOLUTE",
     "TTL_MODE_RELATIVE",
+    "configure_zstack_trigger_chain",
+    "ZStackTriggerChain",
     "RB_MODE_CONSUME",
     "RB_MODE_TTL_TRIGGERED",
     "RB_MODE_ONESHOT_AUTOPLAY",
     "RB_MODE_REPEAT_AUTOPLAY",
     "RB_MODE_ONESHOT_AUTOPLAY_NO_RETURN",
+    "OUT0_MODE_LOW",
+    "OUT0_MODE_HIGH",
+    "OUT0_MODE_MOVE_COMPLETE",
 ]

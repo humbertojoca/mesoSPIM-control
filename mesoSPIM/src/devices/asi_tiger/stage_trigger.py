@@ -111,6 +111,15 @@ RB_MODE_ONESHOT_AUTOPLAY = 2
 RB_MODE_REPEAT_AUTOPLAY = 3
 RB_MODE_ONESHOT_AUTOPLAY_NO_RETURN = 4  # Tiger v3.45+
 
+# TTL Y=<mode> -- this card's OUT0_mode, confirmed from ASI's command:ttl
+# docs. OUT0_MODE_MOVE_COMPLETE (2) is what the design doc's self-
+# sustaining loop needs -- see set_output_mode()'s docstring for the
+# important caveat about WHERE this pulse actually appears (card's own
+# physical OUT connector by default, not necessarily a backplane line).
+OUT0_MODE_LOW = 0
+OUT0_MODE_HIGH = 1
+OUT0_MODE_MOVE_COMPLETE = 2  # pulse at end of MOVE/MOVREL/ring-buffer/array move
+
 
 def load_ring_buffer_point(tiger: TigerController, axis: str, value: float):
     """
@@ -259,6 +268,46 @@ class StageRingBuffer:
         """TTL X=0 -- returns the card to normal (non-ring-buffer)
         motion control."""
         self.tiger.send_command(f"TTL X={TTL_MODE_DISARMED}", card_addr=self.card_addr)
+
+    def set_output_mode(self, mode: int, polarity: int = 1):
+        """
+        TTL Y=<mode> [F=<polarity>] -- configures this card's OUT0
+        behavior. Confirmed from ASI's command:ttl docs: mode=2
+        "generates TTL pulse at end of a commanded move (MOVE, MOVREL,
+        move via ring buffer, or via array module)" -- this is the
+        mechanism the design doc's self-sustaining loop depends on
+        (Z-move-complete -> next frame's trigger).
+
+        IMPORTANT, NOT YET CONFIRMED WHICH APPLIES ON THIS CARD: per
+        ASI's docs, OUT0 is normally the card's own PHYSICAL OUT
+        connector (paired with the IN0 connector the electrical ring-
+        buffer test already jumpers), NOT automatically a numbered
+        backplane line -- backplane routing for a completion pulse is
+        only documented as a special case for a DIFFERENT mode (21,
+        "requires MM_TARGET firmware", not the mode used here) and only
+        since firmware v3.36. Use
+        tools/asi_tiger_z_output_discovery_test.py to determine which
+        applies to this specific card before wiring it into the full
+        self-sustaining loop -- don't assume either possibility.
+
+        polarity: TTL OUT0_polarity -- 1 (default) or -1 (inverted).
+        """
+        cmd = f"TTL Y={mode}"
+        if polarity != 1:
+            cmd += f" F={polarity}"
+        self.tiger.send_command(cmd, card_addr=self.card_addr)
+
+    def set_output_pulse_duration(self, duration: int):
+        """
+        RT Y=<duration> -- sets the OUT0 pulse duration used by
+        set_output_mode(2) (and other timed-pulse OUT0 modes). Units
+        NOT independently confirmed here -- ASI's docs reference this
+        command without stating units explicitly in the TTL page;
+        start with a generously long value for initial discovery
+        testing (easier to observe/catch), narrow down once the
+        pulse's existence and location are confirmed.
+        """
+        self.tiger.send_command(f"RT Y={duration}", card_addr=self.card_addr)
 
     def software_trigger(self):
         """

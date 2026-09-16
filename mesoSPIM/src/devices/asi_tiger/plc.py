@@ -472,6 +472,67 @@ class PLCCard:
         for addr in output_addrs:
             self.configure_io(addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=source_addr)
 
+    def configure_pulse_catchers(self, addresses, reset_cell: int = 1, first_catcher_cell: int = 2):
+        """
+        Configures one "sticky latch" D-flop per address in `addresses`
+        -- each catches ANY rising edge on that address and holds it
+        high until reset. Lets you reliably detect a brief pulse (e.g.
+        a TTL OUT0 move-complete pulse of unknown/short duration) via a
+        slow serial RDADC poll afterward, regardless of how brief the
+        real pulse was or how much serial round-trip latency sits
+        between triggering it and reading back -- avoids needing a
+        scope or precisely-timed polling for discovery/bench testing.
+
+        reset_cell: a manually-controlled D-flop (D/clock tied low, the
+            same pattern used for manual pulse sources elsewhere in
+            this project) whose state you toggle via
+            reset_pulse_catchers() to clear ALL catchers at once. Must
+            not collide with the catcher cell range below.
+        first_catcher_cell: first of len(addresses) CONSECUTIVE cells
+            used as catchers, one per address in the given order.
+
+        FIXED (found via real hardware testing): front-panel BNCs
+        (addr 33-40) default to being configured as PUSH-PULL OUTPUTS,
+        not inputs (backplane lines 41-48 default to input, which is
+        why an earlier version of this method appeared to work for
+        backplane addresses purely by accident of that different
+        default -- it was never actually forcing input mode for
+        either). A BNC address in `addresses` left at its default
+        output type means the PLC is DRIVING that line instead of
+        listening to it -- a real, confirmed pulse jumpered into such a
+        BNC was never caught, not because of a timing issue, but
+        because the input was never actually configured to listen.
+        This method now explicitly forces every BNC address (33-40) in
+        `addresses` to IO_TYPE_INPUT before wiring up its catcher.
+        Backplane addresses are left alone (already default to input,
+        and forcing them here would be harmless but redundant).
+
+        Returns the list of catcher cell numbers, in the same order as
+        `addresses` -- check these bits in read_cell_outputs()'s
+        bitmask (bit = cell_num - 1) to see which address(es) caught a
+        pulse since the last reset.
+        """
+        self.configure_cell(reset_cell, "d_flop", inputs={"a": 0, "b": 0, "c": 0})
+        self.set_cell_state(reset_cell, False)
+
+        catcher_cells = list(range(first_catcher_cell, first_catcher_cell + len(addresses)))
+        for cell, addr in zip(catcher_cells, addresses):
+            if 33 <= addr <= 40:
+                self.configure_io(addr, IO_TYPE_INPUT)
+            self.configure_cell(
+                cell, "d_flop",
+                inputs={"a": CONST_HIGH, "b": rising_edge(addr), "c": cell_addr(reset_cell)},
+            )
+        return catcher_cells
+
+    def reset_pulse_catchers(self, reset_cell: int = 1):
+        """Resets all catchers from configure_pulse_catchers() at once
+        -- pulses the shared reset cell high then low via direct state
+        control (CCA F), the same confirmed mechanism used for manual
+        pulse sources elsewhere in this project."""
+        self.set_cell_state(reset_cell, True)
+        self.set_cell_state(reset_cell, False)
+
     def configure_shutter_gate(
         self,
         trigger_source_addr: int,

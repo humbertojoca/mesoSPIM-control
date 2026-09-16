@@ -21,7 +21,7 @@ or wrapped by any GUI/thread model.
 
 import threading
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Optional
 
 import numpy as np
 

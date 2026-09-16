@@ -78,8 +78,12 @@ asi_dac_parameters = {
     #   jumper installed and verified. H, I, and J were all confirmed
     #   working correctly under the identical protocol -- this looks
     #   isolated to K's own trigger circuit on this specific card, not
-    #   the general architecture. Using J here instead of K until ASI
-    #   can diagnose it (I is the primary channel; J substitutes for K).
+    #   the general architecture. Confirmed working axes for this card
+    #   are H, I, and J -- the actual production pair in use is H and J
+    #   (K's own confirmed replacement is J; H is the other channel,
+    #   not I -- corrected after initially defaulting to I in some
+    #   scripts/config here, since I was also confirmed working and
+    #   easy to mix up with H as "the other good axis").
     #
     # max_step_v on all four: ASI's own warning -- "Sudden jumps in
     # command voltage that are faster then the inertial moment of the
@@ -97,10 +101,10 @@ asi_dac_parameters = {
         {'name': 'galvo_r', 'card_addr': 37, 'axis': 'C', 'range_code': 6,
          'safety_limit_mv': 10000, 'max_step_v': 0.5,
          'units_per_volt': 4000 / 10.24},
-        {'name': 'etl_l',   'card_addr': 34, 'axis': 'I', 'range_code': 1,
+        {'name': 'etl_l',   'card_addr': 34, 'axis': 'H', 'range_code': 1,
          'max_step_v': 0.2},  # original firmware -- default units_per_volt (1000) is correct
         {'name': 'etl_r',   'card_addr': 34, 'axis': 'J', 'range_code': 1,
-         'max_step_v': 0.2},  # J, NOT K -- see the K trigger fault note above
+         'max_step_v': 0.2},  # H and J are the confirmed-good production pair -- NOT K (real hardware fault)
     ],
 
     # ------------------------------------------------------------------

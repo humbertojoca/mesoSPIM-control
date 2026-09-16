@@ -112,7 +112,6 @@ bounds as plain M-command voltages on the same axis.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 import time
 
 from .controller import TigerController

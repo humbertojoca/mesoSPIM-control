@@ -1235,6 +1235,635 @@ any residual settling finish before an acquisition loop's first real
 trigger. Verified the parameter actually delays by the requested amount
 and that the default remains delay-free.
 
+## New: TTL Y= (OUT0) support + discovery test for the loop's missing link
+
+Before starting `configure_zstack_trigger_chain()` (the design doc's
+orchestration function), identified that ONE piece of the self-
+sustaining loop had never been tested: the Z card emitting its own
+completion pulse (`TTL Y=2`) that's supposed to become the next frame's
+trigger. Every other piece (galvo free-run, ETL triggered sweep, Z
+ring-buffer stepping, PLC pulse-pass-through counter) was already
+bench-validated -- building the orchestration function around this
+untested link would have repeated exactly the mistake avoided earlier
+with the pulse counter (guessing at PLC logic instead of testing it).
+
+Checked ASI's actual `command:ttl` docs before assuming anything about
+`OUT0_mode=2`: confirmed it "generates TTL pulse at end of a commanded
+move" as expected, but also surfaced an important wrinkle -- OUT0 is
+documented as normally being the card's own **physical OUT connector**
+(paired with the IN0 connector the ring-buffer electrical test already
+jumpers), NOT automatically a numbered backplane line. Backplane
+routing for a completion-style pulse is only documented for a
+*different*, unrelated mode (21). Didn't want to guess which applies to
+this specific card.
+
+New:
+- **`StageRingBuffer.set_output_mode()`/`set_output_pulse_duration()`**
+  (`TTL Y=`/`RT Y=`) and `OUT0_MODE_*` constants.
+- **`PLCCard.configure_pulse_catchers()`/`reset_pulse_catchers()`** --
+  a bank of latching D-flops that catch any rising edge on a set of
+  addresses and hold it, so a brief completion pulse can be reliably
+  detected via a slow serial readback afterward regardless of exact
+  timing -- no scope needed for discovery, matching this project's
+  established software-first-test methodology.
+- **`tools/asi_tiger_z_output_discovery_test.py`** -- arms the Z ring
+  buffer (confirmed-working), sets `TTL Y=2`, catches across all 8
+  backplane lines simultaneously plus an optional physical-OUT-jumpered
+  BNC, fires one real move, reports which address (if any) caught the
+  pulse. Verified end-to-end against a mocked serial device (control
+  flow, command sequencing, catcher cell assignment for both 8-address
+  and 9-address configurations) -- the mock cannot simulate a real
+  OUT0 pulse existing anywhere, so this only validates the script
+  itself, not the real answer.
+
+Next step: run this on real hardware to find where (if anywhere) the
+pulse actually appears, before writing `configure_zstack_trigger_chain()`
+around it.
+
+## Fix: pulse catchers never forced BNC addresses to input -- repeat of an earlier bug class
+
+Confirmed via real hardware and an oscilloscope: the Z/Theta card DOES
+have a physical OUT0 connector, and it DOES emit a real, clean 1-second
+pulse (with `RT Y=1000`) on every `RM` trigger -- direct evidence
+`RT Y` units are milliseconds. But `asi_tiger_z_output_discovery_test.py`
+still reported "nothing" on the jumpered BNC even with this confirmed
+signal present, which ruled out a wiring/timing explanation and pointed
+at a real bug in `configure_pulse_catchers()`.
+
+**Root cause**: the method configured a D-flop to *listen* to each
+address's rising edge, but never explicitly set BNC addresses (33-40)
+to `IO_TYPE_INPUT` first. Per ASI's docs (already documented elsewhere
+in this same file): front-panel BNCs default to being **push-pull
+outputs**, not inputs -- backplane lines (41-48) default to input,
+which is why the earlier all-backplane sweep result was actually
+correct data (nothing there, consistent with the scope test showing
+the pulse lives on the physical connector) while the BNC-specific check
+was silently broken. This is the exact same bug class found and fixed
+once already in this project (`asi_tiger_galvo_etl_demo.py`'s trigger
+BNC defaulting to output from a prior session) -- missed applying the
+same defensive pattern here on review.
+
+**Fixed**: `configure_pulse_catchers()` now explicitly forces any BNC
+address (33-40) in its input list to `IO_TYPE_INPUT` before wiring its
+catcher cell, leaving backplane addresses untouched (already correct by
+default). Verified the exact command sequence: a backplane address
+goes straight to its catcher's D-flop config with no extra I/O call,
+while a BNC address gets an explicit `CCA Y=0` immediately before its
+catcher is wired.
+
+Next: re-run `asi_tiger_z_output_discovery_test.py --physical-out-bnc <N>`
+with this fix -- given the pulse is scope-confirmed real and present,
+it should now actually be caught.
+
+## New: isolated full-loop test, before committing to configure_zstack_trigger_chain()
+
+With every individual piece of the design doc's fast per-frame loop now
+validated (galvo, ETL, Z-stepping, pulse counter, and -- just confirmed
+-- the Z card's OUT0 completion pulse on its physical connector),
+deliberately did NOT jump straight to writing
+`configure_zstack_trigger_chain()` as permanent library code. Combining
+several individually-correct pieces into a genuinely new thing (here: a
+real closed hardware loop, not just a sequence) is exactly the point
+where a subtle integration mistake becomes possible even when every
+piece is separately proven -- worth one more isolated check first.
+
+New: **`tools/asi_tiger_zstack_loop_isolated_test.py`** -- wires the
+full topology: a one-time host "kick" OR'd with the pulse counter's
+output drives a BNC jumpered to Z's IN0; Z's OUT0 (confirmed physical,
+not backplane) feeds back into the counter's `pulse_in` via a second
+jumper. Once kicked, the loop runs entirely autonomously in hardware --
+the script only polls `WHERE` to observe it, never participates. Bounded
+by `--max-wait-s` with a defensive disarm if no clean stop is detected
+in time. Requires two jumpers (Z OUT0 -> PLC BNC2, PLC BNC1 -> Z IN0)
+matching wiring already in place from the discovery test.
+
+Verified before real hardware use: the OR gate correctly combines the
+kick cell and the counter's own AND-gate cell (not a redundant BNC
+readback), the loop-output BNC is correctly sourced from the OR gate,
+and there's no cell-address collision between the counter's cells (1-5)
+and the new kick/OR-gate cells (6-7). The mock cannot simulate the real
+cross-card physical loop (PLC output -> real Z IN0 -> real move -> real
+Z OUT0 -> real PLC input) -- only real hardware can confirm the loop
+actually closes and stops at N -- so this was checked at the level the
+mock CAN meaningfully verify (wiring logic, cell allocation, script
+control flow and safety cleanup), not faked into reporting false
+confidence about the dynamic behavior.
+
+Not yet promoted to `configure_zstack_trigger_chain()` -- waiting on a
+real-hardware run of this isolated test first.
+
+## New: isolating whether TTL Y=2 or zero-delay retriggering caused the loop glitch
+
+The isolated full-loop test moved Z only 1 of 5 expected times, with
+unexpected brief pulses seen on a scope. Before writing more PLC logic
+to fix it, worked through the user's own restatement of the intended
+architecture (global trigger -> camera; Expose-Out RISING edge -> ETL;
+Expose-Out FALLING edge -> Z; Z's OUT0, if count < N -> next global
+trigger) against what the isolated test actually did, and found a real
+scope mismatch: the isolated test skips camera+ETL entirely, replacing
+that whole chain with a direct OUT0->IN0 feedback with essentially
+ZERO delay (bounded only by the PLC's ~250us eval cycle). The real
+architecture always has at least one full camera exposure period
+between consecutive Z moves -- a substantial natural dead-time the
+isolated test didn't have. Given Z was ALREADY confirmed to handle
+repeated triggers cleanly at 200-300ms host-paced spacing (the
+wraparound tests), the leading hypothesis shifted from "IN0 signal
+shape/re-triggering is fundamentally broken" to "zero-delay
+retriggering specifically is the problem, not TTL Y=2 or IN0 in
+general."
+
+New: **`tools/asi_tiger_z_spacing_test.py`** -- tests exactly this,
+using ONLY already-validated primitives (no new PLC logic): arms Z with
+TTL Y=2 configured (matching the failing test's setup) and RT Y=2000,
+but triggers it via well-spaced host `software_trigger()` calls instead
+of a zero-delay hardware loop. Two possible outcomes and what each
+means: clean 5-for-5 confirms the fix is inserting real dead-time into
+the hardware loop rather than direct feedback; failure even with
+generous spacing would point at TTL Y=2 configuration itself
+interfering with normal triggering, a more fundamental question for
+ASI. Verified end-to-end against the mock (control flow only, not a
+real answer -- only real hardware resolves which hypothesis is correct).
+
+## New: confirming the real camera's Expose-Out signal, before wiring anything to it
+
+First real external (non-Tiger-generated) signal in this project.
+Confirmed by the user directly: Photometrics Iris 15, Rolling Shutter
+mode (matching the design doc's specific recommendation -- avoids "All
+Rows" mode, whose falling edge fires before the full frame actually
+finishes), genuine TTL (5V) levels confirmed via scope + PVCAMTest --
+directly compatible with a PLC BNC input, no signal conditioning
+needed.
+
+New: **`tools/asi_tiger_camera_expose_test.py`** -- before wiring ETL
+(rising edge) and Z (falling edge) triggers to this signal, confirms
+the PLC reliably detects BOTH edges using the same latching-catcher
+technique validated for the Z OUT0 discovery test, run across multiple
+reset-wait-read cycles (not just once) to rule out a one-off fluke.
+Applies the BNC-defaults-to-output fix from earlier directly (forces
+the camera BNC to input before wiring catchers to it). Verified the
+exact rising/falling edge address computation against the mock
+(`rising_edge(bnc_addr(3))=163`, `falling_edge(bnc_addr(3))=227`,
+correctly distinct) and that BNC3 is forced to input before either
+catcher references it -- the mock cannot simulate a real external
+camera signal, so only real hardware answers whether detection is
+actually reliable.
+
+## New: configure_zstack_trigger_chain() -- the full orchestration function
+
+With every individual signal in the design doc's fast per-frame loop
+now validated on real hardware (galvo, ETL, Z-stepping, Z's OUT0 on its
+physical connector, the pulse counter, the camera's Expose-Out edges),
+built the actual orchestration function wiring them together:
+
+    Camera trigger (gated by counter)
+        -> camera exposes
+        -> Expose-Out RISING edge  -> ETL external trigger (SAM=2)
+        -> Expose-Out FALLING edge -> Z ring-buffer trigger
+        -> Z's OUT0 (move complete, physical connector)
+        -> pulse-pass-through counter's pulse_in
+        -> if count < n_planes: counter's output -> camera trigger again
+
+`asi_tiger/zstack_chain.py`: `configure_zstack_trigger_chain()` returns
+a `ZStackTriggerChain` handle (`.reset()`/`.kick()`/`.disarm()`). Scoped
+narrowly -- owns Z's ring-buffer setup directly (since step/n_planes are
+core parameters of this function), but requires ETL's waveform to
+already be configured and armed by the caller (SingleAxisWaveform),
+keeping optics-specific configuration separate from trigger-chain
+routing. Includes BNC-collision validation (`counter_monitor_bnc` can't
+collide with `z_out0_bnc` or the other BNCs already used in the chain).
+
+Verified against a mocked serial device: the full chain configures
+without error (53 commands, no exceptions); ETL's trigger-in (backplane
+addr 44 for axis I) is correctly sourced from the rising edge of the
+camera Expose-Out BNC; Z's trigger BNC is correctly sourced from the
+falling edge of that SAME address (not two different addresses by
+mistake); the BNC-collision check correctly rejects a colliding
+`counter_monitor_bnc`; `.kick()` and `.reset()` send exactly the
+expected command sequences.
+
+### The one genuinely new, untested piece: driving the camera's trigger input
+
+Everything above is a recombination of individually-validated signals.
+`configure_zstack_trigger_chain()` also drives a BNC meant for the
+camera's physical trigger input -- unlike Expose-Out, which has only
+ever been READ in this project, nothing has yet driven a signal INTO
+the camera. New: **`tools/asi_tiger_camera_trigger_test.py`** -- two
+stages (single pulse, confirms any response; several well-spaced
+repeated pulses, confirms reliable per-trigger response, not just the
+first) -- relies on the user watching PVCAMTest's frame counter, since
+this script has no way to query the camera itself. Verified the
+pass-through and fail-early (stops before stage 2 if stage 1 doesn't
+respond) paths both work correctly against the mock.
+
+### Staged test plan for the full chain, before trusting it for real acquisitions
+
+Given the complexity of combining four subsystems (camera, ETL, Z,
+counter) for the first time, do NOT jump straight to running the whole
+chain. Recommended order:
+
+1. **`asi_tiger_camera_trigger_test.py`** (above) -- confirm the camera
+   actually responds to a PLC-driven trigger at all, in isolation.
+2. **ETL responds to Expose-Out's rising edge** -- with the camera
+   free-running (not yet controlled by the chain), route Expose-Out's
+   rising edge to ETL's trigger-in and confirm ETL sweeps in sync,
+   watching a scope or using RDSTAT, over several camera cycles.
+3. **Z responds to Expose-Out's falling edge** -- same idea, confirm Z
+   steps correctly in sync with exposure end, camera still free-running,
+   not yet gated by the counter.
+4. **Full loop** -- only after 1-3 pass individually, wire the counter
+   +kick+OR-gate to actually control the camera (no longer free-running)
+   via `configure_zstack_trigger_chain()`, and confirm the loop runs
+   exactly `n_planes` times then stops, with camera/ETL/Z all
+   participating together autonomously.
+
+Steps 2 and 3 aren't built yet -- next up.
+
+## Confirmed: camera trigger works (staged test plan, step 1 of 4)
+
+`tools/asi_tiger_camera_trigger_test.py` run on real hardware: both
+stages passed cleanly (single pulse captured a frame; 5 repeated
+well-spaced pulses correctly advanced the frame counter by exactly 5).
+The genuinely new piece -- driving a signal INTO the camera -- works.
+
+## New: steps 2 and 3 of the staged test plan (ETL/Z respond to real camera edges)
+
+With camera triggering confirmed, built the next two steps -- testing
+whether ETL and Z each correctly respond to the camera's REAL
+Expose-Out edges, with the camera FREE-RUNNING (not yet controlled by
+the counter/kick), before wiring the full closed loop.
+
+- **`tools/asi_tiger_etl_camera_sync_test.py`** (step 2): routes
+  Expose-Out's rising edge directly to ETL's backplane trigger-in
+  (same `configure_io(..., source_addr=rising_edge(...))` pattern
+  verified in `configure_zstack_trigger_chain()`), arms ETL (SAM=2,
+  already confirmed auto-rearming), and asks for visual scope
+  confirmation across several camera cycles -- no clean software-only
+  way to confirm a waveform actually swept, unlike Z's simple position
+  readback.
+- **`tools/asi_tiger_z_camera_sync_test.py`** (step 3): routes
+  Expose-Out's falling edge to a BNC jumpered to Z's IN0, then polls
+  `WHERE` over a watch window, fully software-confirmable (reports
+  exact deltas and inter-move timing, no scope needed).
+
+Both verified end-to-end against the mock (control flow, correct
+backplane/BNC address routing for ETL's axis I -> addr 44) -- the mock
+cannot simulate a real external camera signal, so both correctly report
+"nothing detected" against it; only real hardware answers the actual
+question. Full regression swept across every file in the patch after
+adding these two.
+
+Staged plan progress: step 1 (camera trigger) confirmed on real
+hardware. Steps 2 and 3 (this entry) are built and ready to run. Step 4
+(the full closed loop via `configure_zstack_trigger_chain()`) should
+only follow once 2 and 3 both pass.
+
+## Fix: routed brief PLC-computed edge pulses instead of sustained levels
+
+Step 2 of the staged test plan (ETL sync to camera Expose-Out) failed
+on real hardware. The user's own instinct to double-check "PLC input
+and mode for single axis function," recalling past fixes in this exact
+area, pointed at the right place before any new guessing was needed.
+
+**Root cause**: `rising_edge(expose_addr)`/`falling_edge(expose_addr)`
+compute a PLC-INTERNAL signal that's only high for about one PLC
+evaluation cycle (~250us) at the exact moment of the real transition --
+a brief, PLC-computed pulse. Every previously confirmed-working ETL/Z
+trigger in this project instead used a genuine, SUSTAINED voltage-level
+change on the backplane/BNC line, letting the destination axis card's
+own trigger hardware do its own edge detection on a signal it can
+actually catch -- not a PLC-precomputed brief pulse. This is backwards
+from how every earlier confirmed trigger in this project worked, and
+likely too brief for the ETL/Z cards' own edge-detection logic to
+reliably catch, even though the address math itself was "correct" in a
+pure combinational-logic sense.
+
+**Fixed** in both `tools/asi_tiger_etl_camera_sync_test.py` and
+`tools/asi_tiger_z_camera_sync_test.py`, and in
+`configure_zstack_trigger_chain()` (same bug, would have failed
+identically once tested -- caught here first thanks to the staged test
+plan's whole purpose: isolating exactly this kind of issue before it's
+buried inside the full closed loop):
+
+- ETL's trigger-in is now sourced from Expose-Out's **raw level**
+  directly (`source_addr=expose_addr`) -- Expose-Out is already high
+  for the entire exposure, a real sustained transition.
+- Z's trigger-in is now sourced from Expose-Out's **inverted level**
+  (`source_addr=inverted(expose_addr)`) -- gives Z's IN0 a genuine
+  sustained low->high transition at the exact moment Expose-Out falls,
+  since `inverted(low)=high`.
+
+Verified the corrected addressing against a mocked serial device: ETL
+correctly sourced from the raw level address (35), Z correctly sourced
+from the inverted level address (35+64=99) -- both genuine sustained-
+level signals, confirmed distinct from the old brief-pulse addresses
+(163/227) they replaced. Full regression swept across every file in
+the patch; both sync test scripts still run cleanly end-to-end.
+
+## Fix: stale ETL axis default (I) in two test scripts, should be H
+
+The design doc's own hardware table says "ETL-L (H), ETL-R (J)" for
+card 34 -- H was always the intended production axis, not I. I was
+used throughout the earliest exploratory ETL testing (before this
+table existed in the conversation) and its default lingered in two
+scripts after everything else moved on. `config_asi_tiger_example.py`
+and `asi_tiger_galvo_etl_demo.py` were already correctly set to H;
+fixed the same stale default in `asi_tiger_etl_camera_sync_test.py`
+and `asi_tiger_shared_trigger_test.py`.
+
+**Validation-coverage note, stated plainly rather than assumed away**:
+the ETL trigger-period margin requirement (2-3ms minimum below the
+camera's real interval, confirmed earlier in this document) was
+empirically characterized specifically on axis I, before the switch to
+H. H's trigger response was separately confirmed via the jumper-swap
+diagnostic during the K-axis fault investigation, and the underlying
+mechanism (`SAM=2`/`TTL X=30`) is architecturally identical across axes
+on the same card/firmware, so the same margin requirement is expected
+to hold -- but this is an expectation carried over from I, not an
+independent confirmation on H specifically. The ETL sync test that just
+passed used a 147ms period, far above the 2-3ms floor, so it doesn't
+actually stress-test this either way. Worth a quick recheck on H
+specifically if real acquisitions push toward tight frame rates near
+that margin.
+
+## CORRECTION: Z needs a brief pulse, not a sustained level -- generalized the ETL fix by analogy without testing it
+
+Step 3 of the staged test plan (Z sync to camera Expose-Out) showed a
+real problem, caught by the user directly checking Z's trigger line on
+a scope: it was held **sustained high for the entire inter-frame gap**
+(the whole period between Expose-Out's falling edge and the next rising
+edge), not a brief pulse -- a direct consequence of using
+`inverted(expose_addr)` (a level, not an edge) for Z's trigger.
+
+Summing the 72 observed position deltas from the real-hardware run
+confirmed this was a genuine problem, not a polling artifact: total was
+590, not the expected 720 (72*10) -- a real 130-unit shortfall. A pure
+sampling/timing artifact would still sum to the correct total
+eventually; this didn't, which rules that explanation out. Several
+pairs of adjacent deltas that summed to 9 instead of 10 (e.g. 4+5, 1+8,
+8+1) are consistent with a second trigger arriving while the previous
+move was still being processed -- the same zero-delay-retriggering
+effect found earlier in the isolated full-loop test, just via a
+different path (a sustained level giving Z's internal trigger detection
+multiple opportunities to fire, rather than literal zero delay).
+
+**Root cause of the fix being wrong in the first place**: the earlier
+ETL fix (brief PLC-computed edge pulses are too short for ETL's SAM=2
+detection, use a sustained level instead) was generalized to Z **by
+analogy, without independently testing whether Z has the same
+limitation**. It doesn't -- Z's `TTL X=12` ring-buffer trigger is a
+different subsystem (stage motion control, not the DAC waveform
+engine), and evidently does NOT tolerate a sustained level the way
+ETL's `SAM=2` does. Assuming two different trigger mechanisms behave
+identically because they're both "TTL inputs on the same controller"
+was the actual mistake, not the original brief-pulse approach for Z.
+
+**Fixed**: reverted `tools/asi_tiger_z_camera_sync_test.py` and
+`configure_zstack_trigger_chain()`'s Z routing back to
+`falling_edge(expose_addr)` (a brief pulse), while leaving ETL's
+routing on the sustained raw level (still correct, still confirmed
+working, untouched by this fix). Verified both addresses independently
+against a mocked serial device: Z correctly back on `falling_edge`
+(addr 227, a brief pulse), ETL still correctly on the raw level (addr
+35, a sustained level) -- confirming the two axes now have genuinely
+different, independently-verified signal shapes rather than one
+assumed-equivalent treatment for both.
+
+**Lesson for the rest of this integration**: don't generalize a fix
+found on one subsystem to another subsystem just because they look
+similar from the outside (both "TTL trigger inputs"). Test each one's
+actual requirement independently, the same way every other piece of
+this project has been validated -- this is exactly what the staged test
+plan's step-by-step structure is for, and it caught this before it was
+buried inside the full closed loop.
+
+## Fix: WHERE can return an empty reply under active triggering, and a more trustworthy verification method
+
+Re-running the Z sync test with the brief-pulse fix in place showed
+real improvement (deltas mostly clean +10/+11, no more of the earlier
+extreme swings like +23/-3) but the script crashed partway through:
+`WHERE` returned a bare `:A` with no position data attached, which the
+script's `parse_position()` couldn't handle. This is informative on its
+own -- consistent with Z being momentarily busy processing an
+actively-arriving electrical trigger and unable to immediately answer a
+serial query, not a crash-worthy failure.
+
+This matters beyond just the crash: if `WHERE` can silently return
+stale or incomplete data during active triggering (not just the one
+case that happened to produce an empty string outright), then some of
+the polled per-move deltas from BOTH this run and the earlier
+sustained-level run may be **measurement artifacts** -- a poll catching
+Z mid-update -- not necessarily all genuine missing motion. Summing the
+25 deltas from this run gives 209 against an expected 250 (25*10) --
+still a real, unresolved shortfall even with the brief-pulse fix, but
+now confounded by an independently-confirmed measurement reliability
+issue, so it can't be fully trusted as a measure of genuine physical
+behavior on its own.
+
+**Fixed**: `read_position_robust()` retries briefly on any failure
+(empty reply, parse error, or an exception from the controller itself)
+instead of crashing or misrecording bad data, and skips (rather than
+fabricates) a poll cycle if retries are exhausted. **More importantly**,
+the script now also takes a clean, DISARMED, settled final position
+reading after the watch window ends and compares total displacement
+against the expected total (moves observed x step) -- this final
+check is immune to any in-flight polling reliability issues, since
+Z is no longer being actively triggered when it's taken, and is the
+number to actually trust over the polled per-move deltas.
+
+Verified against a mocked serial device: the script survives simulated
+empty `WHERE` replies without crashing (both a transient failure that
+recovers via retry, and a persistent one that exhausts retries and is
+correctly skipped rather than crashing or fabricating a value).
+
+**Still open**: whether the brief-pulse fix fully resolved the original
+shortfall, or whether a smaller, genuine discrepancy remains once
+measurement artifacts are correctly excluded via the clean final check
+-- needs a real hardware re-run with this fix to get a trustworthy
+answer, not assumed either way.
+
+## New: independent camera-frame-count cross-check, replacing the unreliable polled move count
+
+A real-hardware run at 500ms camera exposure showed polled move
+intervals clustering around ~0.21s AND ~0.41s (roughly double each
+other) -- consistent with the poll loop occasionally catching Z
+mid-transition and splitting one real move across two polls (a
+small/negative delta immediately followed by a compensating larger
+one), not genuine back-and-forth motion. This means the polled move
+COUNT itself (not just individual deltas) can't be fully trusted --
+the earlier "expected = moves_observed * step" comparison was
+comparing against a number that could itself be wrong.
+
+**Fixed properly** rather than trying to make the polling more precise
+(which can't fully solve a fundamental measurement-during-active-
+triggering problem): `asi_tiger_z_camera_sync_test.py` now prompts for
+PVCAMTest's own frame counter before and after the watch window -- a
+ground-truth trigger count entirely independent of this script's
+Z-position polling -- and compares the clean, disarmed, settled final
+displacement against (real camera frames x step). This is the
+comparison to trust. The polled per-move data is retained for
+diagnostic visibility only, explicitly labeled as less trustworthy in
+the output.
+
+Verified both outcomes against a mocked serial device (a background
+thread simulates a real external move occurring mid-watch-window,
+independent of the script's own trigger logic, matching how a real
+camera-driven move would appear): a MISMATCH scenario correctly
+reports the real discrepancy, and a MATCH scenario correctly reports
+success -- including correctly showing the old polled-count-based
+comparison as clearly wrong in the same MATCH case, directly
+demonstrating why the camera-based check is the one to rely on.
+
+## Replaced: free-running + manual frame-counter approach was rightly rejected as imprecise
+
+Correctly flagged: asking a human to type PVCAMTest's frame counter
+before/after a watch window, with the camera free-running, is a
+race-prone, approximate ground truth -- not a real fix for the
+"is the polled move count trustworthy" problem, just a different
+source of imprecision.
+
+**Better approach, adopted**: drive the camera with a precise,
+host-controlled trigger count instead of letting it free-run --
+reusing the exact mechanism already confirmed working in
+`asi_tiger_camera_trigger_test.py` (PLC BNC -> camera trigger input).
+"How many real exposures occurred" is then known exactly by
+construction (we generated them), not estimated by a human or inferred
+from noisy position polling. Combined with the clean, disarmed,
+settled final position reading (already established as reliable),
+this gives a fully precise comparison with no ambiguity on either side.
+
+`asi_tiger_z_camera_sync_test.py` rewritten around this: fires exactly
+`--n-triggers` camera pulses (same confirmed-working 10ms pulse width),
+well-spaced (`--trigger-spacing-s`, must exceed the camera's real
+exposure+readout cycle), routes Expose-Out's falling edge to Z's
+trigger as before (still the confirmed-correct brief-pulse signal
+shape), then compares total displacement against exactly
+`n_triggers x step`. No manual counter-reading, no free-running camera,
+no per-move polling relied on for the verdict.
+
+Verified against a mocked serial device: exact routing confirmed for
+both signals (Z sourced from Expose-Out's falling edge, camera trigger
+BNC sourced from the manual kick cell) via direct command inspection;
+a synchronous mock camera simulation (hooked into the serial write()
+call itself, avoiding the race conditions a polling-based simulation
+had) confirms both the MATCH and MISMATCH reporting paths compute the
+correct arithmetic.
+
+## New: step 4 (final step) -- the actual full closed-loop test
+
+With steps 1-3 all precisely confirmed (camera trigger exact, ETL
+syncs to Expose-Out rising edge, Z syncs to Expose-Out falling edge
+with an exact host-controlled trigger-count match), built the test for
+the real thing: `configure_zstack_trigger_chain()` with camera, ETL,
+and Z all participating together, camera gated by the plane counter
+instead of free-running or host-triggered individually.
+
+New: **`tools/asi_tiger_full_loop_test.py`**. Configures and arms ETL
+separately first (the chain function only handles trigger routing, not
+ETL's waveform/SAM=2 arming, per its documented prerequisites), then
+calls `configure_zstack_trigger_chain()` with the exact BNC wiring
+already established across steps 1-3 (BNC1->Z IN0, BNC2<-Z OUT0,
+BNC3<-camera Expose-Out, BNC4->camera trigger -- no new jumpers
+needed). Deliberately does NOT poll `WHERE` during the autonomous run
+(confirmed unreliable during active triggering in step 3) -- waits a
+generous fixed duration instead, then takes one clean, disarmed,
+settled final reading and compares against exactly `n_planes x z_step`,
+the same precise methodology that resolved step 3.
+
+Verified end-to-end against a mocked serial device: full setup runs
+without error (ETL configuration, chain configuration, kick, wait,
+disarm, cleanup), no exceptions, correctly reports the expected
+mismatch given the mock has no real closed-loop hardware behind it.
+
+This is the last piece of the staged test plan -- real hardware
+confirmation is the next and final step before this library's Z-stack
+trigger chain can be considered validated end-to-end.
+
+## Fix: off-by-one in the full loop -- n_planes=3 produced 4 frames, confirmed on real hardware
+
+First real-hardware run of `asi_tiger_full_loop_test.py` (`--n-planes 3`)
+showed 4 camera exposures and 4 ETL sweeps on a scope, and a position
+mismatch of exactly +1 step -- both independently confirming the same
+extra frame. The user's own diagnosis ("the counter lets the cycle
+re-arm and only blocks after N+1") pointed precisely at the right area
+and matched a deeper trace exactly.
+
+**Root cause, confirmed not to be a counter bug**: re-running
+`asi_tiger_pulse_counter_test.py --single --n-pulses 3` (and separately
+at 300) in isolation showed the counter passing exactly 3 and blocking
+the rest, both times, confirmed on a scope too -- the counter's own
+pass/block logic is correct. The actual bug is in how
+`configure_zstack_trigger_chain()` uses it: the kick independently
+starts frame 1 before the counter has seen anything, so passing
+through N pulses (as the code did) causes N *retriggers* on top of that
+first frame -- N+1 total frames, not N. Tracing the full sequence for
+n_planes=3: kick->frame1, frame1's pulse passes->frame2, frame2's pulse
+passes->frame3, and critically frame3's pulse ALSO passes (the
+confirmed-correct Nth pass)->frame4, which is one too many.
+
+**Also found**: this function's own docstring had ALREADY been updated
+to describe this exact fix in full detail (kick accounts for frame 1,
+counter should use n_planes-1, n_planes must be >=3) -- but the actual
+code still said `n_pulses=n_planes`, not `n_planes-1`. A real
+documentation/implementation mismatch that would have been actively
+misleading (reads as already fixed, wasn't). Now actually fixed to
+match what the docstring already said, plus the missing `n_planes>=3`
+validation the docstring described but the code never implemented.
+
+**Fixed**: `configure_pulse_pass_through_counter_single()` is now
+called with `n_pulses=n_planes-1`. Added the missing `if n_planes < 3:
+raise ValueError(...)` check (the counter's own n_pulses>=2 constraint,
+combined with n_planes-1, means n_planes must be >=3 for this specific
+architecture -- tighter than the counter's own standalone minimum).
+
+Verified against a mocked serial device: `n_planes=2` now correctly
+raises `ValueError`; `n_planes=3` correctly configures the underlying
+one-shot counter cell with `config=1` (i.e. `n_pulses-1` where
+`n_pulses=n_planes-1=2`), not the old buggy value that would have
+configured it for 3.
+
+## MILESTONE: staged full-loop test plan confirmed complete on real hardware
+
+`asi_tiger_full_loop_test.py` confirmed MATCH at both `n_planes=3` and
+`n_planes=300` -- exact position match, no host involvement after the
+kick, camera/ETL/Z genuinely running together autonomously, gated
+correctly by the now-fixed counter. This closes the entire staged test
+plan (camera trigger, ETL sync, Z sync, full loop), each step
+individually confirmed precisely before being combined, catching three
+real bugs along the way (the sustained-level-vs-brief-pulse mistake,
+the WHERE-during-active-triggering reliability issue, and the kick/
+counter off-by-one) that would otherwise have been much harder to
+isolate inside the full assembly.
+
+Two additional real-hardware findings from this confirmation run:
+
+**PLC BNC types saved as the permanent default (`36SS Z`)**: user
+configured BNC1=output/BNC2=input/BNC3=input/BNC4=output (exactly
+matching this project's confirmed wiring: BNC1->Z IN0, BNC2<-Z OUT0,
+BNC3<-camera Expose-Out, BNC4->camera trigger) and saved it. This is a
+sound, deliberate choice -- and since `configure_zstack_trigger_chain()`
+already reconfigures these fresh every time it runs, the save is a
+safety net for other tools/manual `--raw` sessions rather than
+something the chain itself depends on. Worth the same honest caveat as
+before, though: `SS Z` saves the ENTIRE current PLC state, so whatever
+cells 1-7 (counter/kick/OR-gate) happened to be configured for at the
+moment of saving (e.g. whichever `n_planes` was last tested) is now
+part of the permanent default too -- likely harmless in practice since
+those get reconfigured fresh on every real call, but worth knowing if
+inspecting the saved default later looks unexpectedly specific rather
+than "clean."
+
+**Camera Expose-Out pulse duration != configured exposure time in
+Rolling Shutter mode**: confirmed on real hardware, a 150ms exposure
+setting produced a ~120ms real Expose-Out pulse -- about 30ms shorter.
+ETL's period must be set relative to the REAL pulse duration (with the
+usual 2-3ms margin below that), not the raw exposure setting, or the
+same missed-trigger margin issue found earlier will resurface. Whether
+this exact ~30ms offset is a fixed camera characteristic or scales with
+exposure time is NOT yet confirmed (only one data point) -- updated
+`--etl-period-ms` help text in both `asi_tiger_full_loop_test.py` and
+`asi_tiger_etl_camera_sync_test.py` to state this plainly rather than
+leave the stale "confirmed safe" claim that predates this finding.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level -- the only

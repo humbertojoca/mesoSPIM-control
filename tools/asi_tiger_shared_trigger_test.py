@@ -58,7 +58,9 @@ def main():
     parser.add_argument("--baudrate", type=int, default=115200)
 
     parser.add_argument("--etl-card-addr", type=int, default=34)
-    parser.add_argument("--etl-axis", default="I")
+    parser.add_argument("--etl-axis", default="H",
+                         help="ETL-L per the design doc's hardware table (card 34: 'ETL-L (H), "
+                              "ETL-R (J)').")
     parser.add_argument("--etl-card-first-axis", default="H")
     parser.add_argument("--etl-amplitude", type=float, default=1.0, help="Vpp")
     parser.add_argument("--etl-offset", type=float, default=2.0, help="V")

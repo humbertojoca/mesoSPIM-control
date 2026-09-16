@@ -33,7 +33,6 @@ from pathlib import Path
 
 os.environ["QT_LOGGING_RULES"] = "qt.core.qobject.connect=false"
 
-import numpy as np
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,

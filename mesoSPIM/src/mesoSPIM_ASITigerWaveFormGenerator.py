@@ -53,11 +53,9 @@ import logging
 import time
 from typing import Optional
 
-import numpy as np
-
 from .mesoSPIM_WaveFormGenerator import mesoSPIM_WaveFormGenerator
 
-from .devices.asi_tiger import TigerController, ASITigerDAC, PLCCard, bnc_addr, backplane_addr
+from .devices.asi_tiger import TigerController, ASITigerDAC, PLCCard, bnc_addr
 from .devices.asi_tiger.waveform import WaveformStreamer
 
 logger = logging.getLogger(__name__)

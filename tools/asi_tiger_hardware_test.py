@@ -58,7 +58,7 @@ sys.path.insert(0, str(_REPO_ROOT / "mesoSPIM" / "src" / "devices"))
 
 from asi_tiger import (
     TigerController, TigerError, ASITigerDAC, PLCCard,
-    bnc_addr, backplane_addr, inverted,
+    bnc_addr, inverted,
 )
 
 
@@ -164,7 +164,7 @@ def test_dac(tiger: TigerController, channels: list, test_voltage: float, intera
 def test_plc_self_test(plc: PLCCard):
     print("\n--- Internal logic self-test (no external wiring needed) ---")
     print("Programming scratch cell 16 as AND(constant_1, constant_1) -> expect output 1")
-    plc.configure_cell(16, "and2", inputs={"a": 64, "b": 64})  # 64 = inverted(0) = constant 1
+    plc.configure_cell(16, "and2", inputs={"a": inverted(0), "b": inverted(0)})  # constant 1 AND constant 1
     time.sleep(0.05)
     out = plc.read_cell_outputs()
     bit15_high = bool(out & (1 << 15))
@@ -172,7 +172,7 @@ def test_plc_self_test(plc: PLCCard):
           f"| {'PASS' if bit15_high else 'FAIL'}")
 
     print("Reprogramming scratch cell 16 as AND(constant_1, constant_0) -> expect output 0")
-    plc.configure_cell(16, "and2", inputs={"a": 64, "b": 0})
+    plc.configure_cell(16, "and2", inputs={"a": inverted(0), "b": 0})  # constant 1 AND constant 0
     time.sleep(0.05)
     out = plc.read_cell_outputs()
     bit15_low = not bool(out & (1 << 15))
@@ -263,7 +263,7 @@ def test_plc(tiger: TigerController, card_addr: int, axis: str, args) -> PLCCard
     safe_call("clear_state()", plc.clear_state)
 
     try:
-        self_test_ok = test_plc_self_test(plc)
+        test_plc_self_test(plc)
 
         if args.plc_camera_bnc is not None:
             if prompt_yes_no(f"\nRun a live read on BNC{args.plc_camera_bnc} so you can verify wiring?", default=True):
