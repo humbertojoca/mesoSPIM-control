@@ -328,6 +328,100 @@ class StageRingBuffer:
         """
         return self.tiger.send_command(f"WHERE {self.axis}", card_addr=self.card_addr)
 
+    def move_absolute(self, position: float, wait: bool = True,
+                       poll_interval_s: float = 0.05, timeout_s: float = 30.0,
+                       settle_tolerance: float = 2.0, extra_settle_s: float = 0.1) -> bool:
+        """
+        M <axis>=<position> -- a direct, immediate, HOST-COMMANDED move
+        to an absolute position. NOT the same mechanism as
+        arm_absolute()/load_absolute_point() (the TTL-triggered ring-
+        buffer mode, for per-frame stepping) -- this is the simple,
+        synchronous move a row-level setup step needs (e.g. moving Z to
+        a row's starting position before the fast per-frame trigger
+        chain begins, or moving back afterward -- potentially a
+        multi-mm jump between tiles/rows, not just a small step). See
+        this module's docstring for that intended architecture:
+        "Row-level (once, slow): absolute MOVE to Z_start."
+
+        wait: if True (default), blocks until the move is genuinely
+        complete (or timeout_s elapses). If False, sends the move and
+        returns True immediately without waiting or settling.
+
+        CONFIRMED ON REAL HARDWARE, TWICE: RDSTAT's 'M' flag clears
+        BEFORE the stage has physically finished settling, and the gap
+        is NOT a fixed duration -- it scales with how far the move
+        traveled. A settle_s=0 run showed every move landing 1-3
+        microns short, reproducibly. A later run with a small FIXED
+        settle_s (0.3s) passed cleanly at 5-micron moves but left a
+        residual short-fall specifically on a 100-micron move within
+        the same run -- direct evidence that a single fixed delay can't
+        be right for both a small row-to-row nudge and a multi-mm
+        tile-to-tile jump: too short for the large case, needlessly
+        slow for the small one.
+
+        Fixed properly instead of picking a bigger constant: after
+        RDSTAT reports idle, this now polls WHERE directly and waits
+        until the reported position is within settle_tolerance (raw
+        position units -- default 2.0, a small margin above the ~1-unit
+        mechanical noise floor already characterized for the ring
+        buffer) of the commanded target, rather than assuming any fixed
+        or distance-scaled wait is correct. This self-adapts to
+        whatever the real settling time actually is for THIS specific
+        move -- near-instant for a small step, longer for a large one --
+        with nothing to mis-tune. Polling WHERE this way (a single slow
+        settling check, not concurrent with any fast electrical
+        triggering) is a different situation from the earlier-confirmed
+        WHERE-reliability problem during ACTIVE, high-rate camera-
+        triggered Z stepping -- that issue was specific to querying a
+        busy axis under fast concurrent hardware triggering, not to a
+        single command's own settle check.
+
+        extra_settle_s: a small additional buffer applied AFTER the
+        tolerance check passes, in case of brief residual mechanical
+        ringing an encoder-position check alone might not catch. Not
+        yet independently confirmed necessary on top of the tolerance
+        check -- kept small and conservative rather than assumed away
+        entirely.
+
+        Returns True if the move genuinely settled within timeout_s (or
+        wait=False was passed), False if RDSTAT never cleared, or
+        position never converged to within settle_tolerance, before
+        timeout_s ran out -- caller decides how to handle that, this
+        does not raise.
+        """
+        self.tiger.send_command(f"M {self.axis}={position}", card_addr=self.card_addr)
+        if not wait:
+            return True
+
+        start = time.perf_counter()
+
+        # Phase 1: wait for RDSTAT to clear 'M' (commanded move finished)
+        while True:
+            if time.perf_counter() - start >= timeout_s:
+                return False
+            try:
+                reply = self.tiger.send_command(f"RDSTAT {self.axis}+", card_addr=self.card_addr)
+            except Exception:
+                reply = "M"  # treat a failed read as "still busy", not "done" -- safer default
+            if "M" not in reply:
+                break
+            time.sleep(poll_interval_s)
+
+        # Phase 2: RDSTAT clearing is NOT sufficient (confirmed above) -- poll WHERE
+        # until position genuinely converges to within settle_tolerance of the target.
+        while time.perf_counter() - start < timeout_s:
+            try:
+                actual = float(self.where().split("=")[-1])
+            except Exception:
+                time.sleep(poll_interval_s)
+                continue
+            if abs(actual - position) <= settle_tolerance:
+                if extra_settle_s > 0:
+                    time.sleep(extra_settle_s)
+                return True
+            time.sleep(poll_interval_s)
+        return False
+
     def set_mode(self, mode: int):
         """
         RM F=<mode> -- the ring buffer's own operating mode (see the

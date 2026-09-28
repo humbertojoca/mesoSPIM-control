@@ -23,8 +23,6 @@ from .dac import (
 from .plc import (
     PLCCard, CELL_TYPE,
     IO_TYPE_INPUT, IO_TYPE_OPEN_DRAIN_OUTPUT, IO_TYPE_PUSH_PULL_OUTPUT,
-    TRIGGER_INTERNAL_4KHZ, TRIGGER_BACKPLANE_C7, TRIGGER_BACKPLANE_C13,
-    TRIGGER_BACKPLANE_C14, TRIGGER_BNC1,
     cell_addr, bnc_addr, backplane_addr, inverted, rising_edge, falling_edge,
 )
 from .singleaxis import (
@@ -36,6 +34,7 @@ from .singleaxis import (
 )
 
 from .zstack_chain import configure_zstack_trigger_chain, ZStackTriggerChain
+from .row_setup import configure_laser_enable_lines, LaserEnableLines, configure_lr_switch, LRSwitch
 
 from .stage_trigger import (
     StageRingBuffer, load_ring_buffer_point,
@@ -59,11 +58,6 @@ __all__ = [
     "IO_TYPE_INPUT",
     "IO_TYPE_OPEN_DRAIN_OUTPUT",
     "IO_TYPE_PUSH_PULL_OUTPUT",
-    "TRIGGER_INTERNAL_4KHZ",
-    "TRIGGER_BACKPLANE_C7",
-    "TRIGGER_BACKPLANE_C13",
-    "TRIGGER_BACKPLANE_C14",
-    "TRIGGER_BNC1",
     "cell_addr",
     "bnc_addr",
     "backplane_addr",
@@ -93,6 +87,10 @@ __all__ = [
     "TTL_MODE_RELATIVE",
     "configure_zstack_trigger_chain",
     "ZStackTriggerChain",
+    "configure_laser_enable_lines",
+    "LaserEnableLines",
+    "configure_lr_switch",
+    "LRSwitch",
     "RB_MODE_CONSUME",
     "RB_MODE_TTL_TRIGGERED",
     "RB_MODE_ONESHOT_AUTOPLAY",

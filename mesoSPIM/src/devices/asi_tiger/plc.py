@@ -78,13 +78,6 @@ IO_TYPE_INPUT = 0
 IO_TYPE_OPEN_DRAIN_OUTPUT = 1
 IO_TYPE_PUSH_PULL_OUTPUT = 2
 
-# Trigger source codes for the PM command (evaluation clock source)
-TRIGGER_INTERNAL_4KHZ = 0
-TRIGGER_BACKPLANE_C7 = 1     # diSPIM: micro-mirror card master clock
-TRIGGER_BACKPLANE_C13 = 2
-TRIGGER_BACKPLANE_C14 = 3
-TRIGGER_BNC1 = 4             # external clock/trigger wired into BNC 1
-
 
 def cell_addr(n: int) -> int:
     """Address of logic cell n (1-16)."""
@@ -134,7 +127,7 @@ class PLCCard:
 
     Usage:
         plc = PLCCard(tiger_controller, card_addr=36, axis="E")
-        plc.set_trigger_source(TRIGGER_BNC1)   # external camera TTL on BNC1
+        plc.configure_io(bnc_addr(1), IO_TYPE_INPUT)   # e.g. external camera TTL on BNC1
         ...
         plc.safe_all_outputs()   # NOT clear_state() -- see clear_state()'s docstring
     """
@@ -197,28 +190,45 @@ class PLCCard:
         io_type: IO_TYPE_INPUT / IO_TYPE_OPEN_DRAIN_OUTPUT / IO_TYPE_PUSH_PULL_OUTPUT.
         source_addr: for outputs, which cell/I/O drives this line
                      (ignored for inputs).
+
+        ORDERING (real-hardware finding, see PATCHNOTES): CCA Y (I/O
+        type) and CCA Z (source address) are two SEPARATE serial
+        round-trips, not one atomic write. The previous version sent
+        Y first, then Z -- meaning a pin transitioning to an output
+        went briefly LIVE while CCA Z still held whatever source
+        address was stored from the LAST time this address was
+        configured (possibly a different script/session entirely,
+        possibly hours earlier). If that stale source happened to be
+        high at that exact moment, the pin would glitch high for the
+        few-millisecond gap between the two commands -- a real,
+        physically-driven edge, not just a logical inconsistency, and
+        exactly the kind of thing a camera in external-trigger mode
+        (which only needs a brief edge) would catch as a genuine
+        trigger. Fixed by writing the source address FIRST (storing
+        the register while the pin is still whatever it was before --
+        doesn't yet drive anything) and the type LAST, so a pin only
+        ever goes live already pointing at the intended source.
+        Symmetrically, when reverting TO input, the source is also
+        reset to constant-low (address 0) AFTER the type change, so a
+        stale non-zero source can never again be inherited by some
+        future configure_io() call on this same address that (for any
+        reason) doesn't pass its own source_addr.
         """
         self._select(io_addr)
-        self.tiger.send_command(f"CCA Y={io_type}", card_addr=self.card_addr)
-        if io_type != IO_TYPE_INPUT and source_addr is not None:
-            self.tiger.send_command(f"CCA Z={source_addr}", card_addr=self.card_addr)
-
-        if io_type == IO_TYPE_INPUT:
-            self._output_addrs.discard(io_addr)
-        else:
+        if io_type != IO_TYPE_INPUT:
+            self.tiger.send_command(
+                f"CCA Z={source_addr if source_addr is not None else 0}", card_addr=self.card_addr
+            )
+            self.tiger.send_command(f"CCA Y={io_type}", card_addr=self.card_addr)
             self._output_addrs.add(io_addr)
+        else:
+            self.tiger.send_command(f"CCA Y={io_type}", card_addr=self.card_addr)
+            self.tiger.send_command("CCA Z=0", card_addr=self.card_addr)
+            self._output_addrs.discard(io_addr)
 
     # ------------------------------------------------------------------
     # Card-level operations
     # ------------------------------------------------------------------
-    def set_trigger_source(self, code: int):
-        """Set the evaluation-cycle clock source (PM command). See TRIGGER_* constants."""
-        self.tiger.send_command(f"PM {self.axis}={code}", card_addr=self.card_addr)
-
-    def load_preset(self, preset_num: int):
-        """Load one of ASI's built-in card presets (see PLC manual Tables 4-5)."""
-        self.tiger.send_command(f"CCA X={preset_num}", card_addr=self.card_addr)
-
     def reset_all_cells_and_io(self):
         """
         Unconditionally resets EVERY logic cell (1-16) to a harmless
@@ -278,17 +288,48 @@ class PLCCard:
     def safe_all_outputs(self):
         """
         Reconfigures every physical I/O this PLCCard instance has set as
-        an output (tracked automatically by configure_io()) back to
-        IO_TYPE_INPUT -- the one thing that actually stops a BNC/backplane
-        line from being driven, regardless of what logic is still
-        programmed into the cells behind it.
+        an output (tracked automatically by configure_io()) to drive a
+        hardwired constant LOW (CONST_LOW, address 0) -- NOT to
+        IO_TYPE_INPUT as an earlier version of this method did.
+
+        REAL-HARDWARE FINDING (root cause of a reported spurious camera
+        exposure, order-dependent: only reproduced when a per-frame-test
+        run preceded another run, never when a loop-test run did --
+        traced to exactly this difference: ZStackTriggerChain.disarm()
+        never changes any BNC's I/O TYPE at all, it only disarms Z's ring
+        buffer and clears Z's OUT0 mode, so its BNCs stay live outputs the
+        whole time; this method, by contrast, used to flip driven outputs
+        straight to IO_TYPE_INPUT). Reverting a push-pull output that has
+        been actively driving a line LOW straight to a floating,
+        high-impedance INPUT can itself produce a brief glitch on some
+        hardware -- the line is no longer being held low by anything for
+        the instant between the old drive stopping and whatever the
+        receiving device's own input biasing settles to, and a camera in
+        external-trigger mode only needs a few microseconds of a rising
+        edge to latch a real exposure. This is a plausible, electrically
+        sound explanation for why ONLY this method's revert-to-input
+        behavior (never ZStackTriggerChain.disarm()'s leave-as-output
+        behavior) could produce a spurious trigger, independent of the
+        separate CCA-Y/CCA-Z command-ordering race fixed in
+        configure_io() (that fix alone did not resolve the report).
+
+        Fixed: instead of releasing the line to a floating input, this
+        method now keeps it as an OUTPUT but repoints its source to
+        CONST_LOW (a hardwired constant-0 register, not any logic cell).
+        This achieves the SAME original goal safe_all_outputs() exists
+        for -- see clear_state()'s docstring: a live logic cell (e.g. a
+        toggle that keeps switching on every camera trigger) must not be
+        left driving a physical line after the host disconnects -- while
+        also never producing a floating/undriven transition: the line
+        stays continuously, actively driven low, permanently disconnected
+        from any cell whose state could ever change again.
 
         Call this whenever you're done with a PLC configuration, not just
         clear_state() -- see clear_state()'s docstring for why. Safe to
         call even if nothing was ever configured as an output (no-op).
         """
         for addr in list(self._output_addrs):
-            self.configure_io(addr, IO_TYPE_INPUT)
+            self.configure_io(addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=CONST_LOW)
 
     def disable_two_laser_toggle(
         self,
@@ -572,45 +613,54 @@ class PLCCard:
     def configure_pulse_pass_through_counter_single(
         self,
         pulse_in_addr: int,
-        pulse_out_bnc: int,
         n_pulses: int,
+        pulse_out_bnc: Optional[int] = None,
         cells=(1, 2, 3, 4, 5),
     ):
         """
-        Same behavior as configure_pulse_pass_through_counter() -- pass
-        an incoming pulse train through unchanged for exactly n_pulses,
-        then block until reset_pulse_pass_through_counter() is called --
-        but using a SINGLE one-shot counter instead of two cascaded ones.
+        Passes an incoming pulse train through unchanged for exactly
+        n_pulses, then blocks it, until reset_pulse_pass_through_counter()
+        is called.
 
-        Use this instead of the two-counter (n_inner*n_outer) version
-        whenever n_pulses fits in one 16-bit one-shot (up to 65535),
-        which covers realistic Z-stack plane counts with room to spare.
-        The two-counter version exists to reach totals beyond 65535 by
-        multiplying two 16-bit counters together, but that comes at a
-        real cost: since BOTH factors must be >= 2 (a one-shot's
-        duration=0 never fires -- see below), n_inner*n_outer cannot
-        represent N=1, N=2, N=3, or any PRIME N (5, 7, 11, 13, ...) --
-        there's no way to factor a prime into two integers both >= 2.
-        A single counter only excludes N=1, not primes -- a
-        meaningfully smaller limitation, and the right choice whenever
-        the range fits.
+        Derived from ASI's own documented, customer-tested example --
+        "Pass through pulse N*M times" on the TGPLC wiki page -- using a
+        SINGLE one-shot counter instead of their original two cascaded
+        ones. Their two-counter form multiplies two 16-bit counters to
+        reach totals beyond 65535 (~65535^2); this project's realistic
+        Z-stack plane counts fit comfortably within one counter's
+        65535-pulse range, so the second stage was dropped -- fewer
+        cells, and no prime-N gap (see CONSTRAINT below). The cell roles,
+        addresses, and edge/invert combinations that remain are still
+        cross-checked against ASI's literal example values, just with
+        the outer-counter stage removed and the latch flop wired
+        directly to this counter's own falling edge instead.
 
-        This is the SAME cell 2 (inner counter) from
-        configure_pulse_pass_through_counter(), with the now-redundant
-        outer-counter stage removed and the latch flop wired directly
-        to this counter's own falling edge instead of an outer
-        counter's. The counter cell's own logic is unchanged from the
-        two-counter version -- only the now-unnecessary second stage is
-        removed.
-
-        CONSTRAINT (same reason as the two-counter version): n_pulses
-        must be >= 2 -- a one-shot's documented behavior for duration=0
-        (n_pulses=1) is "output never goes high," which breaks the
-        counting logic rather than blocking after 1 pulse.
+        CONSTRAINT (from how a one-shot's duration config works -- see
+        command:sam/CCA Z docs: "If the duration is set to 0 then the
+        output will never go high"): n_pulses must be >= 2, since the
+        one-shot's config is (n_pulses-1), and a config of 0 breaks that
+        cell's counting entirely.
 
         pulse_in_addr: address of the incoming pulse (e.g. bnc_addr(1)
                        or a backplane trigger address).
-        pulse_out_bnc: BNC number (1-8) for the gated output.
+        pulse_out_bnc: OPTIONAL BNC number (1-8) for a physical monitor
+                       of the gated output, purely for an optional scope
+                       check -- the counter's REAL functional output
+                       (e.g. driving a camera trigger via an OR gate, see
+                       configure_zstack_trigger_chain()) already reads
+                       cell_addr(cells[-1]) directly, not this BNC, so
+                       nothing depends on it being wired. Default None:
+                       no physical output configured at all -- pass an
+                       explicit BNC only if you actually want to watch it
+                       on a scope AND have confirmed that BNC isn't
+                       already claimed by something else. FOUND ON REAL
+                       PROJECT USE: an earlier default of 8 here silently
+                       collided with row_setup.configure_laser_enable_lines()'s
+                       default laser BNCs (5-8) once both were used
+                       together -- with Z/camera (BNCs 1-4) and lasers
+                       (5-8) now claiming all 8 physical BNCs on this
+                       rack, there ISN'T a safe default BNC left for this
+                       purely-optional feature, hence None.
         cells: which 5 cells to use, in role order (initialize, count,
                latch, delay, output-AND) -- defaults 1-5.
         """
@@ -652,102 +702,8 @@ class PLCCard:
             inputs={"a": pulse_in_addr, "b": inverted(cell_addr(c_delay))},
         )
 
-        self.configure_io(bnc_addr(pulse_out_bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=cell_addr(c_and))
-        if 33 <= pulse_in_addr <= 40:
-            self.configure_io(pulse_in_addr, IO_TYPE_INPUT)
-
-    def configure_pulse_pass_through_counter(
-        self,
-        pulse_in_addr: int,
-        pulse_out_bnc: int,
-        n_inner: int,
-        n_outer: int,
-        cells=(1, 2, 3, 4, 5, 6),
-    ):
-        """
-        Passes an incoming pulse train through unchanged for exactly
-        n_inner * n_outer pulses, then blocks it, until
-        reset_pulse_pass_through_counter() is called.
-
-        FAITHFUL PORT of ASI's own documented, customer-tested example --
-        "Pass through pulse N*M times" on the TGPLC wiki page ("A
-        customer had an external pulse that they wanted to pass through
-        a set number of times and then disable the pass-through"). This
-        is NOT independently designed sequential logic -- every cell
-        role, address, and edge/invert combination below matches ASI's
-        published Beanshell script exactly (cross-checked the composite
-        edge/invert addresses -- e.g. falling_edge(cell) == their
-        "addrEdge+addrInvert+addrCell" -- against their literal example
-        values before using them here).
-
-        Splitting the total count into two cascaded one-shots (rather
-        than one) is ASI's own design, not an arbitrary choice here --
-        it lets the total reach n_inner * n_outer up to ~65535^2, far
-        beyond a single one-shot's 65535-pulse limit.
-
-        CONSTRAINT (from how a one-shot's duration config works -- see
-        command:sam/CCA Z docs: "If the duration is set to 0 then the
-        output will never go high"): BOTH n_inner and n_outer must be
-        >= 2, since each one-shot's config is (n-1), and a config of 0
-        breaks that cell's counting entirely. For small or prime totals
-        that can't be factored this way, pick a decomposition with some
-        slack (e.g. n_inner=2 and a slightly larger n_outer) rather than
-        an exact minimal factorization -- see PATCHNOTES for a discussion
-        of a possible single-stage simplification for small N, which is
-        NOT part of this faithful port and would need its own separate
-        verification before trusting it.
-
-        pulse_in_addr: address of the incoming pulse (e.g. bnc_addr(1)
-                       or a backplane trigger address).
-        pulse_out_bnc: BNC number (1-8) for the gated output.
-        cells: which 6 cells to use, in ASI's documented role order
-               (initialize, inner-count, outer-count, latch, delay,
-               output-AND) -- defaults match their example (1-6).
-        """
-        if n_inner < 2 or n_outer < 2:
-            raise ValueError(
-                f"n_inner and n_outer must both be >= 2 (one-shot duration=0 never fires) -- "
-                f"got n_inner={n_inner}, n_outer={n_outer}"
-            )
-        c_init, c_inner, c_outer, c_latch, c_delay, c_and = cells
-
-        # cell 1: initialize/reset flag -- constant, held low during normal operation
-        self.configure_cell(c_init, "constant", config=CONST_LOW)
-
-        # cell 2: inner count -- one-shot (NRT), high for n_inner pulses then low
-        self.configure_cell(
-            c_inner, "one_shot", config=n_inner - 1,
-            inputs={"a": rising_edge(pulse_in_addr), "b": rising_edge(pulse_in_addr), "c": cell_addr(c_init)},
-        )
-
-        # cell 3: outer count -- one-shot (NRT), clocked by inner count's falling edge
-        self.configure_cell(
-            c_outer, "one_shot", config=n_outer - 1,
-            inputs={"a": falling_edge(cell_addr(c_inner)), "b": falling_edge(cell_addr(c_inner)), "c": cell_addr(c_init)},
-        )
-
-        # cell 4: latch flop -- latches high the first time the full count is exhausted
-        self.configure_cell(
-            c_latch, "d_flop",
-            inputs={"a": CONST_HIGH, "b": falling_edge(cell_addr(c_outer)), "c": cell_addr(c_init)},
-        )
-
-        # cell 5: delay flop -- delays the stop signal by one pulse-in cycle so the
-        # FINAL pulse still makes it through the output AND gate below
-        self.configure_cell(
-            c_delay, "d_flop",
-            inputs={"a": cell_addr(c_latch), "b": falling_edge(pulse_in_addr), "c": cell_addr(c_init)},
-        )
-
-        # cell 6: output AND gate -- passes pulse_in through while not yet latched-stopped
-        self.configure_cell(
-            c_and, "and2",
-            inputs={"a": pulse_in_addr, "b": inverted(cell_addr(c_delay))},
-        )
-
-        self.configure_io(bnc_addr(pulse_out_bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=cell_addr(c_and))
-        # Ensure the input side is actually configured as an input if it's a BNC
-        # (a no-op/harmless if pulse_in_addr is a backplane address instead)
+        if pulse_out_bnc is not None:
+            self.configure_io(bnc_addr(pulse_out_bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=cell_addr(c_and))
         if 33 <= pulse_in_addr <= 40:
             self.configure_io(pulse_in_addr, IO_TYPE_INPUT)
 
@@ -772,3 +728,25 @@ class PLCCard:
         """Directly set a stateful cell's (flip-flop) output (CCA F)."""
         self._select(cell_addr(cell_num))
         self.tiger.send_command(f"CCA F={1 if high else 0}", card_addr=self.card_addr)
+
+    def read_cell_state(self, cell_num: int) -> float:
+        """
+        CCA F? -- reads the currently-selected cell's STATE, which per
+        ASI's own tiger_programmable_logic_card docs is NOT the same
+        thing as its binary output (that's read_cell_outputs()/
+        RDADC Z?). For a D-flop, state IS just the output (0 or 1). But
+        for one-shots, delay cells, and counters, ASI's docs are
+        explicit: state is "the current clock counter value... (counter
+        decreases with each clock)" -- i.e. the internal countdown,
+        readable directly, not just a derived done/not-done bit.
+
+        Confirmed from ASI's own docs, NOT yet independently verified on
+        real hardware in this project -- e.g. the exact starting value,
+        direction, and value at exhaustion for a one-shot configured via
+        configure_pulse_pass_through_counter_single() haven't been
+        empirically confirmed here. See
+        tools/asi_tiger_counter_state_test.py for that.
+        """
+        self._select(cell_addr(cell_num))
+        reply = self.tiger.send_command("CCA F?", card_addr=self.card_addr)
+        return float(reply.split("=")[-1].split()[0])

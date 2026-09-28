@@ -50,6 +50,8 @@ SingleAxisWaveform.start() separately, matching the design doc.
 """
 
 from dataclasses import dataclass
+import time
+from typing import Optional
 
 from .controller import TigerController
 from .plc import (
@@ -74,6 +76,7 @@ class ZStackTriggerChain:
     z: StageRingBuffer
     kick_cell: int
     counter_reset_cell: int
+    counter_cells: tuple = (1, 2, 3, 4, 5)
 
     def reset(self):
         """Re-arms the plane counter for a fresh count of N. Call this
@@ -95,6 +98,135 @@ class ZStackTriggerChain:
         self.z.disarm()
         self.z.set_output_mode(OUT0_MODE_LOW)
 
+    def is_complete(self) -> bool:
+        """
+        Checks whether the current row's plane count has been fully
+        exhausted -- i.e. the self-sustaining loop has genuinely
+        stopped on its own, not just paused between planes.
+
+        Reads the counter's LATCH cell (the 3rd of the 5 counter cells,
+        index [2] of counter_cells) via read_cell_outputs()/RDADC Z?,
+        NOT the AND-gate output cell and NOT an exact countdown value.
+        Deliberately: the AND-gate output only pulses briefly during an
+        actual passing pulse, so a single read of it can't tell
+        "between planes, still counting" apart from "genuinely done" --
+        the same ambiguity that made a single WHERE read unreliable
+        during active Z triggering. The latch cell is designed
+        differently: it goes high once and STAYS high until the next
+        reset(), which is the unambiguous signal this needs. RDADC Z?
+        (logic cell outputs) has not shown any of WHERE's OWN reliability
+        issues anywhere in this project, unlike querying a busy axis.
+
+        CONFIRMED ON REAL HARDWARE: a malformed/empty serial reply to
+        RDADC Z? CAN happen -- not previously observed, but also never
+        previously polled this intensively (wait_until_complete()'s
+        default poll_interval_s=0.1 over a timeout_s=60 default means up
+        to ~600 reads in a single call). A real-hardware run crashed with
+        an unhandled IndexError parsing an empty reply. Treats a failed
+        read the same way move_absolute() treats a failed RDSTAT read --
+        as "not confirmed done" (returns False), letting the caller's
+        own polling loop simply retry on the next interval, rather than
+        crash the whole wait.
+
+        Safe to poll repeatedly during an active, autonomous loop --
+        this reads PLC logic state, not an axis's busy status.
+        """
+        latch_cell = self.counter_cells[2]
+        try:
+            bitmask = self.plc.read_cell_outputs()
+        except Exception:
+            return False
+        return bool(bitmask & (1 << (latch_cell - 1)))
+
+    def wait_until_complete(self, timeout_s: float = 60.0, poll_interval_s: float = 0.1,
+                             final_frame_settle_s: float = 1.0) -> bool:
+        """
+        Polls is_complete() until it's True, THEN waits an additional
+        final_frame_settle_s before returning -- see CONFIRMED ON REAL
+        HARDWARE below for why this extra wait is NOT optional.
+
+        CONFIRMED ON REAL HARDWARE: is_complete()'s own latch goes high
+        ONE FRAME TOO EARLY relative to "the whole acquisition,
+        including the final frame, is genuinely done" -- a real bug in
+        this method's earlier version, found from a real-hardware
+        report (oscilloscope showing the ETL waveform dropping
+        mid-sweep, before the FINAL frame's own Expose-Out had even
+        gone low) and inconsistent final-position mismatches (missing
+        exactly one step's worth on some runs, matching exactly on
+        others). Traced the exact mechanism: the latch cell clocks on
+        the count cell's falling edge, which happens the moment the
+        one-shot's internal countdown reaches zero -- DURING the
+        (n_planes-1)th Z-move-complete pulse, the SAME pulse that
+        passes through the AND-gate (the delay-cell mechanism
+        deliberately lets the triggering pulse itself through, "so the
+        FINAL pulse still makes it through") and starts the FINAL
+        frame's own exposure. So the latch reads "complete" at the
+        exact moment the final frame BEGINS, not when it finishes.
+        Whether the earlier version (no extra wait) happened to look
+        correct depended entirely on whether poll_interval_s's own
+        polling delay happened to exceed the final frame's real
+        duration by chance -- explaining why some runs matched exactly
+        and others were short by one step, unpredictably.
+
+        final_frame_settle_s: MUST cover at least the final frame's own
+        full cycle (camera exposure + ETL sweep + Z move + Z settle) --
+        NOT a cosmetic buffer. The default (1.0s) is a starting point,
+        not a measured value for any specific hardware -- set this
+        based on your real camera exposure time and ETL period, the
+        same way move_absolute()'s settle_tolerance needed real
+        characterization rather than a guessed default.
+        """
+        start = time.perf_counter()
+        while time.perf_counter() - start < timeout_s:
+            if self.is_complete():
+                if final_frame_settle_s > 0:
+                    time.sleep(final_frame_settle_s)
+                return True
+            time.sleep(poll_interval_s)
+        return False
+
+    def planes_remaining(self) -> Optional[int]:
+        """
+        Reads the counter's internal countdown directly (CCA F? on the
+        count cell, index [1] of counter_cells) -- confirmed from ASI's
+        own docs that a one-shot's "state" is its internal countdown,
+        separate from its binary output. Useful for a PROGRESS
+        indicator ("N planes remaining") -- NOT the mechanism
+        is_complete()/wait_until_complete() rely on for the actual
+        completion decision.
+
+        CONFIRMED ON REAL HARDWARE (asi_tiger_counter_state_test.py):
+        the countdown equals real planes-remaining ONLY while the row
+        is still actively passing pulses. Once blocked (is_complete()
+        is True), the one-shot's own trigger input keeps re-arming on
+        every further incoming pulse -- it doesn't know the downstream
+        latch has already blocked the output -- so its countdown keeps
+        CYCLING (observed: 0, then back up to 4, counting down again,
+        repeating) even though the row is genuinely finished. Checking
+        is_complete() first and short-circuiting to 0 avoids ever
+        returning a stale, misleadingly-nonzero "remaining" count for a
+        row that's actually done.
+
+        CAVEAT (see is_complete()/wait_until_complete()'s own docs for
+        the full explanation): is_complete() itself goes True one full
+        frame before the acquisition is REALLY finished -- the latch
+        fires the moment the final frame BEGINS, not when it ends. This
+        method short-circuits to 0 at that same, slightly-early moment,
+        so "0 remaining" can appear while the final frame is still
+        physically running. Fine for a progress indicator; don't treat
+        0 here as "safe to disarm now" without also respecting
+        wait_until_complete()'s final_frame_settle_s.
+
+        Returns None if the read fails.
+        """
+        if self.is_complete():
+            return 0
+        count_cell = self.counter_cells[1]
+        try:
+            return int(self.plc.read_cell_state(count_cell))
+        except Exception:
+            return None
+
 
 def configure_zstack_trigger_chain(
     tiger: TigerController,
@@ -112,7 +244,7 @@ def configure_zstack_trigger_chain(
     camera_trigger_bnc: int,
     z_in0_bnc: int,
     z_out0_bnc: int,
-    counter_monitor_bnc: int = 8,
+    counter_monitor_bnc: Optional[int] = None,
     z_out0_pulse_duration_ms: int = 50,
     kick_cell: int = 6,
     or_gate_cell: int = 7,
@@ -147,11 +279,24 @@ def configure_zstack_trigger_chain(
         NOT YET VALIDATED, see module docstring's warning.
     z_in0_bnc: PLC BNC wired TO the Z card's IN0.
     z_out0_bnc: PLC BNC wired FROM the Z card's OUT0.
-    counter_monitor_bnc: a SEPARATE spare BNC the counter's own output
-        also drives, purely as an optional scope-visible "counter
-        fired" indicator -- must NOT be the same as z_out0_bnc (that
-        one needs to stay an input, reading Z's real OUT0 signal; this
-        one is a distinct output).
+    counter_monitor_bnc: OPTIONAL separate spare BNC the counter's own
+        output also drives, purely as an optional scope-visible
+        "counter fired" indicator -- the counter's real functional
+        output (driving the camera trigger via the OR gate) already
+        reads the cell directly, nothing depends on this BNC being
+        wired. Default None: no physical monitor output configured at
+        all. FOUND ON REAL PROJECT USE: an earlier default of 8 here
+        silently collided with row_setup.configure_laser_enable_lines()'s
+        default laser BNCs (5-8) once both were used together --
+        z_in0_bnc/z_out0_bnc/camera_expose_bnc/camera_trigger_bnc (1-4)
+        plus the default laser BNCs (5-8) now claim all 8 physical BNCs
+        on this rack, so there ISN'T a safe default left for this
+        purely-optional feature. Pass an explicit BNC only if you
+        actually want a scope-visible indicator AND have separately
+        confirmed that BNC isn't already claimed by something else (this
+        function only validates against the OTHER BNCs it knows about
+        below -- it has no visibility into what row_setup.py or your own
+        code has claimed, so that check is yours to do).
     z_out0_pulse_duration_ms: RT Y=<value> for Z's OUT0 -- confirmed
         RT Y=1000 gives a 1-second pulse on real hardware, so this is
         assumed to be milliseconds. Default kept short since the real
@@ -173,16 +318,18 @@ def configure_zstack_trigger_chain(
             f"Since the underlying counter itself requires n_pulses>=2, n_planes-1>=2 means "
             f"n_planes must be >= 3 -- see this function's docstring for the full explanation."
         )
-    if counter_monitor_bnc == z_out0_bnc:
+    if counter_monitor_bnc is not None and counter_monitor_bnc == z_out0_bnc:
         raise ValueError(
             f"counter_monitor_bnc ({counter_monitor_bnc}) must differ from z_out0_bnc "
             f"({z_out0_bnc}) -- z_out0_bnc must stay an input reading Z's real OUT0 signal, "
             f"not also be reconfigured as an output by the counter."
         )
-    if counter_monitor_bnc in (camera_expose_bnc, camera_trigger_bnc, z_in0_bnc):
+    if counter_monitor_bnc is not None and counter_monitor_bnc in (camera_expose_bnc, camera_trigger_bnc, z_in0_bnc):
         raise ValueError(
             f"counter_monitor_bnc ({counter_monitor_bnc}) collides with another BNC already "
-            f"used in this chain -- pick a genuinely spare one."
+            f"used in this chain -- pick a genuinely spare one. Note this check only knows "
+            f"about the BNCs THIS function uses (1-4 by convention) -- it can't see BNCs "
+            f"claimed elsewhere, e.g. row_setup.configure_laser_enable_lines()'s default 5-8."
         )
 
     plc = PLCCard(tiger, card_addr=plc_card_addr, axis=plc_axis)
@@ -249,4 +396,5 @@ def configure_zstack_trigger_chain(
 
     plc.reset_pulse_pass_through_counter(init_cell=counter_cells[0])
 
-    return ZStackTriggerChain(plc=plc, z=z, kick_cell=kick_cell, counter_reset_cell=counter_cells[0])
+    return ZStackTriggerChain(plc=plc, z=z, kick_cell=kick_cell, counter_reset_cell=counter_cells[0],
+                              counter_cells=counter_cells)

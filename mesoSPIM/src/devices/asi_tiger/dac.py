@@ -37,15 +37,31 @@ import time
 
 from .controller import TigerController, TigerError
 
-# PR command range codes for SIGNAL_DAC_4CH firmware.
+# PR command range codes for SIGNAL_DAC_4CH / TGGALVO firmware.
+# CORRECTED against ASI's currently-documented command:pr table
+# (docs.asiimaging.com/commands/pr) -- an earlier version of this table
+# had codes 3-6 shifted by one position relative to what ASI's docs
+# actually say (e.g. this project's code claimed 6 = +/-10.24V, but
+# ASI's own docs say 6 = +/-5.12V and 7 = +/-10.24V), and was missing
+# code 7 entirely. Fixed to match ASI's current docs exactly. NOT
+# independently verified against real hardware for every code -- see
+# ASITigerDAC.query_range()'s docstring: confirm the REAL, currently-
+# active range code via PR <axis>? before trusting any code's safety
+# limits for something safety-relevant (e.g. a galvo scanner), the
+# same as everything else in this project.
 DAC_RANGE_CODES = {
     "0V_2.048V": 0,
     "0V_4.096V": 1,
     "0V_10.24V": 2,
-    "-1.024V_1.024V": 3,
-    "-2.048V_2.048V": 4,
-    "-5.128V_5.128V": 5,
-    "-10.24V_10.24V": 6,  # firmware default
+    # code 3 is a special "restart-dependent default" selector per ASI's
+    # docs, not a fixed range -- deliberately omitted from this
+    # name-based lookup (use the numeric code 3 directly with set_range()
+    # if you specifically want that behavior, understanding what it
+    # resolves to depends on firmware version -- see command:pr docs)
+    "-1.024V_1.024V": 4,
+    "-2.048V_2.048V": 5,
+    "-5.12V_5.12V": 6,  # firmware default
+    "-10.24V_10.24V": 7,
 }
 
 # (min_mV, max_mV) per range code -- used for client-side clamping so we
@@ -54,15 +70,17 @@ DAC_RANGE_CODES = {
 # readability reasons) and stay firmware-agnostic -- what changes
 # between firmwares is units_per_volt (see DacChannel), the encoding
 # used to represent a given real voltage on the wire, not the safety
-# bound itself.
+# bound itself. CORRECTED -- see DAC_RANGE_CODES' comment above for why.
+# Code 3 omitted deliberately (restart-dependent default, not a fixed
+# range -- see command:pr docs before using set_range(name, 3)).
 DAC_RANGE_LIMITS_MV = {
     0: (0, 2048),
     1: (0, 4096),
     2: (0, 10240),
-    3: (-1024, 1024),
-    4: (-2048, 2048),
-    5: (-5128, 5128),
-    6: (-10240, 10240),
+    4: (-1024, 1024),
+    5: (-2048, 2048),
+    6: (-5120, 5120),
+    7: (-10240, 10240),
 }
 
 # Raw device units per volt, by firmware. SIGNAL_DAC_4CH's native units
@@ -119,7 +137,14 @@ class DacChannel:
     name: str
     card_addr: int
     axis: str
-    range_code: int = 6  # default +/-10.24V
+    range_code: int = 6  # firmware's factory default per ASI's docs (+/-5.12V,
+    # corrected from an earlier wrong table -- see DAC_RANGE_CODES' comment).
+    # NEVER independently verified against real hardware for ANY channel in
+    # this project -- set_range()/PR has never actually been called anywhere
+    # here, so this is a software-side label only, not confirmed to match
+    # whatever range the real hardware is actually running. Use
+    # ASITigerDAC.query_range() to check before trusting this for anything
+    # safety-relevant.
     safety_limit_mv: Optional[float] = None
     max_step_v: Optional[float] = None
     max_step_delay_s: float = 0.005
@@ -171,6 +196,7 @@ class ASITigerDAC:
         else:
             raise ValueError("Provide either port= or an existing tiger=TigerController")
         self.channels: Dict[str, DacChannel] = {}
+        self._pending_range_changes: Dict[int, int] = {}  # card_addr -> requested range_code
 
     # ------------------------------------------------------------------
     def connect(self):
@@ -260,20 +286,94 @@ class ASITigerDAC:
     # ------------------------------------------------------------------
     def set_range(self, name: str, range_code: int):
         """
-        Set the output voltage range for a channel's card (PR command).
+        Sends the PR command to change a channel's card's output range.
 
-        NOTE: PR is a CARD-WIDE setting on SIGNAL_DAC_4CH cards -- this
-        will affect every registered channel that shares the same
-        card_addr, not just `name`. Their cached range_code is updated
-        to match so limits_mv stays accurate for all of them.
+        IMPORTANT -- CONFIRMED FROM ASI'S OWN command:pr DOCS: this
+        setting does NOT take effect until the controller is reset or
+        restarted ("Controller reset or restart is needed for setting
+        to take effect"). Sending PR alone changes nothing about the
+        ACTUAL hardware output range yet.
+
+        Because of that, this method deliberately does NOT update this
+        channel's cached range_code (and thus limits_mv, which
+        set_voltage()'s safety check relies on) immediately -- doing so
+        would create a dangerous window where software believes a wider
+        (or narrower) range is already active and permits/computes
+        set_voltage() calls accordingly, while the hardware is still
+        actually operating on the OLD range. Given ASI's own docs note
+        the axis's raw millivolt encoding is range-code-dependent (e.g.
+        "PR H=2, the maximum axis value of H is 10240" vs "PR H=0...is
+        2048"), a value that's valid under the NEW range but sent before
+        the hardware has actually switched could be badly wrong, not
+        just clipped.
+
+        Instead, this records the requested range_code as PENDING for
+        this channel's card_addr. Every OTHER channel on the same
+        card_addr keeps using its OLD cached range_code (and thus old,
+        safe limits_mv) until you explicitly call
+        confirm_range_change(card_addr) -- which you should only do
+        AFTER actually resetting/restarting the controller and
+        confirming the new range is genuinely active.
+
+        NOTE: PR is a CARD-WIDE setting on SIGNAL_DAC_4CH cards -- the
+        pending change (and later, confirm_range_change()) affects
+        every registered channel that shares the same card_addr as
+        `name`, not just `name` itself.
         """
         if range_code not in DAC_RANGE_LIMITS_MV:
             raise ValueError(f"Unknown range_code {range_code}; valid: {list(DAC_RANGE_LIMITS_MV)}")
         ch = self._get(name)
         self.tiger.send_command(f"PR {ch.axis}={range_code}", card_addr=ch.card_addr)
+        self._pending_range_changes[ch.card_addr] = range_code
+
+    def confirm_range_change(self, card_addr: int):
+        """
+        Call this ONLY AFTER you have actually reset or restarted the
+        controller following set_range(), and confirmed (e.g. by
+        checking PR <axis>? or a real voltage measurement) that the new
+        range is genuinely active. Applies the pending range_code from
+        set_range() to every registered channel on card_addr, updating
+        their cached range_code (and thus limits_mv) so set_voltage()'s
+        safety check reflects the hardware's real, now-active range.
+
+        Raises ValueError if no pending change was recorded for this
+        card_addr (i.e. set_range() was never called, or this was
+        already confirmed once).
+        """
+        if card_addr not in self._pending_range_changes:
+            raise ValueError(
+                f"No pending range change recorded for card_addr={card_addr} -- "
+                f"did you call set_range() first? (Or this was already confirmed.)"
+            )
+        range_code = self._pending_range_changes.pop(card_addr)
         for other in self.channels.values():
-            if other.card_addr == ch.card_addr:
+            if other.card_addr == card_addr:
                 other.range_code = range_code
+
+    def pending_range_change(self, card_addr: int) -> Optional[int]:
+        """Returns the range_code requested via set_range() for this
+        card_addr that hasn't been confirmed yet via
+        confirm_range_change(), or None if there's nothing pending."""
+        return self._pending_range_changes.get(card_addr)
+
+    def query_range(self, name: str) -> str:
+        """
+        PR <axis>? -- queries the REAL, currently-active range code
+        directly from the hardware, as a raw reply string. Read-only,
+        safe to call anytime.
+
+        Use this to check whether a channel's cached range_code
+        actually matches reality -- set_range()/PR has never been
+        called anywhere in this project as of this writing, so every
+        channel's range_code (including the default) is a software-side
+        label only, never confirmed against the real hardware. Worth
+        checking before trusting limits_mv for anything safety-relevant
+        (e.g. a galvo scanner) -- if the raw reply's code doesn't match
+        this channel's cached range_code, the safety bounds set_voltage()
+        is enforcing don't reflect the hardware's real, actual range.
+        """
+        ch = self._get(name)
+        return self.tiger.send_command(f"PR {ch.axis}?", card_addr=ch.card_addr)
 
     # ------------------------------------------------------------------
     # Voltage set/get

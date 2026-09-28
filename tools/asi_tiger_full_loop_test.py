@@ -13,11 +13,15 @@ falling edge with an EXACT trigger-count match (not estimated).
 
 Learned from earlier testing: WHERE polling during active triggering
 can be unreliable (empty replies, possible stale reads). This script
-does NOT poll during the loop -- it waits a generous fixed duration for
-the autonomous loop to finish on its own (gated by the counter, no
-host involvement needed), THEN takes one clean, disarmed, settled
-position reading and compares against EXACTLY n_planes x z_step --
-matching the precise, ambiguity-free methodology that resolved step 3.
+does NOT poll WHERE during the loop -- instead it polls the counter's
+LATCH cell (ZStackTriggerChain.wait_until_complete()), a robust,
+non-ambiguous signal read via RDADC Z? (logic cell outputs), which has
+shown no reliability issues anywhere in this project, unlike querying
+a busy axis. This detects real completion directly instead of waiting
+a fixed, conservative duration. THEN takes one clean, disarmed,
+settled position reading and compares against EXACTLY n_planes x
+z_step -- matching the precise, ambiguity-free methodology that
+resolved step 3.
 
 REQUIRED: camera in EXTERNAL TRIGGER mode in PVCAMTest (this chain
 controls the camera itself, it does not free-run).
@@ -81,7 +85,7 @@ def main():
     parser.add_argument("--etl-card-first-axis", default="H")
     parser.add_argument("--etl-amplitude", type=float, default=0.38, help="Vpp")
     parser.add_argument("--etl-offset", type=float, default=2.32, help="V")
-    parser.add_argument("--etl-period-ms", type=float, default=147.0,
+    parser.add_argument("--etl-period-ms", type=float, default=120.0,
                          help="CONFIRMED ON REAL HARDWARE: the camera's real Expose-Out pulse "
                               "duration in Rolling Shutter mode is NOT the same as the configured "
                               "exposure time -- one confirmed data point showed a 150ms exposure "
@@ -95,21 +99,41 @@ def main():
     parser.add_argument("--camera-trigger-bnc", type=int, default=4)
     parser.add_argument("--z-in0-bnc", type=int, default=1)
     parser.add_argument("--z-out0-bnc", type=int, default=2)
-    parser.add_argument("--counter-monitor-bnc", type=int, default=8)
+    parser.add_argument("--counter-monitor-bnc", type=int, default=None,
+                         help="OPTIONAL scope-visible 'counter fired' indicator -- nothing "
+                              "depends on this functionally. Default None (no physical monitor): "
+                              "with Z/camera (BNCs 1-4) and the default laser enable BNCs (5-8, "
+                              "see row_setup.configure_laser_enable_lines()) now claiming all 8 "
+                              "physical BNCs on this rack, there isn't a safe default left for "
+                              "this purely-optional feature. Pass an explicit BNC only if you've "
+                              "separately confirmed it isn't already claimed by something else.")
     parser.add_argument("--n-planes", type=int, default=3,
                          help="Target plane count -- START SMALL on a first run")
     parser.add_argument("--seconds-per-plane-estimate", type=float, default=3.0,
-                         help="Generous per-plane wait estimate -- total wait is n_planes x this, "
-                              "plus a fixed safety margin. Not polled during the run (WHERE "
-                              "polling during active triggering is unreliable), so err generous.")
+                         help="Now just a SAFETY BOUND, not a blind wait -- the loop's real "
+                              "completion is polled directly via wait_until_complete() (the "
+                              "counter's latch cell, a robust signal safe to poll during an "
+                              "active loop -- unlike WHERE during active Z triggering). Total "
+                              "timeout is n_planes x this, plus a fixed safety margin -- only "
+                              "matters if the loop somehow never completes.")
     parser.add_argument("--safety-margin-s", type=float, default=5.0)
+    parser.add_argument("--poll-interval-s", type=float, default=0.1)
+    parser.add_argument("--final-frame-settle-s", type=float, default=1.0,
+                         help="CONFIRMED ON REAL HARDWARE: wait_until_complete()'s own "
+                              "completion signal (the latch cell) fires the moment the FINAL "
+                              "frame BEGINS, not when it finishes -- this must cover at least "
+                              "that final frame's own full cycle (camera exposure + ETL sweep "
+                              "+ Z move + settle), not just be a cosmetic buffer. 1.0s is a "
+                              "starting point, not measured for your specific camera/ETL "
+                              "timing -- see zstack_chain.py's wait_until_complete() docstring "
+                              "for the full explanation of why this exists.")
     parser.add_argument("--yes", action="store_true")
     args = parser.parse_args()
 
-    total_wait = args.n_planes * args.seconds_per_plane_estimate + args.safety_margin_s
+    timeout_s = args.n_planes * args.seconds_per_plane_estimate + args.safety_margin_s
     print(f"Full closed-loop test: target {args.n_planes} planes, {args.z_step/10:.2f} micron/step.")
-    print(f"Will wait {total_wait:.0f}s (fixed, not polled) for the autonomous loop to finish, "
-          f"then take one clean final reading.")
+    print(f"Will poll for real completion (timeout bound: {timeout_s:.0f}s), then take one clean "
+          f"final reading.")
     print(f"Wiring: PLC BNC{args.z_in0_bnc}->Z IN0, PLC BNC{args.z_out0_bnc}<-Z OUT0, "
           f"PLC BNC{args.camera_expose_bnc}<-camera Expose-Out, PLC BNC{args.camera_trigger_bnc}->camera trigger.")
     print("REQUIRED: camera in EXTERNAL TRIGGER mode in PVCAMTest -- this chain controls it directly.")
@@ -132,13 +156,37 @@ def main():
             print(f"\nREFUSING: ETL swing [{etl_lo:.3f}, {etl_hi:.3f}]V outside [0, 4.096]V.")
             return
 
-        print(f"\nConfiguring and arming ETL (axis {args.etl_axis})...")
+        # Diagnostic for the "spurious exposure before ETL is armed" report: read
+        # camera_trigger_bnc's raw level BEFORE touching anything, so a residual-high
+        # condition left by a PREVIOUS script/run (if any) is visible here rather than
+        # silently glitching through moments later, during configure_zstack_trigger_chain().
+        try:
+            from asi_tiger import PLCCard as _PLCCard
+            _diag_plc = _PLCCard(tiger, card_addr=args.plc_card_addr, axis=args.plc_axis)
+            trig_bit = 1 << (args.camera_trigger_bnc - 1)
+            bnc_pre = _diag_plc.read_bnc_inputs() & trig_bit
+            print(f"Diagnostic: BEFORE any setup -- BNC{args.camera_trigger_bnc} raw level = "
+                  f"{'HIGH' if bnc_pre else 'low'} (leftover from a prior run, if any).")
+        except Exception as exc:
+            print(f"Diagnostic read failed (non-fatal): {exc}")
+
+        print(f"\nConfiguring ETL (axis {args.etl_axis})...")
         etl = SingleAxisWaveform(tiger, card_addr=args.etl_card_addr, axis=args.etl_axis)
         etl.stop_and_zero()
         enable_backplane_trigger_mode(tiger, card_addr=args.etl_card_addr)
         etl.configure(pattern=PATTERN_SAWTOOTH, amplitude_v=args.etl_amplitude,
                       offset_v=args.etl_offset, period_ms=args.etl_period_ms, external_trigger=True)
-        etl.arm_triggered(free_running=False)
+        # NOT armed yet -- CONFIRMED (real-hardware report) that arming here, before
+        # configure_zstack_trigger_chain() below has wired the trigger-in line to the
+        # camera's real Expose-Out, is a real ordering bug: the ETL's backplane
+        # trigger-in reflects whatever the PREVIOUS script/run left it as (potentially a
+        # floating, undriven input if the prior run's own cleanup reset it) until the
+        # chain below establishes real wiring -- an armed ETL (SAM=2, fires on ANY
+        # rising edge) watching an unconnected line risks picking up a spurious edge
+        # and sweeping once before the real loop even starts. Arm AFTER the chain is
+        # fully configured instead, matching the order that's already correct in
+        # mesoSPIM_ASITigerWaveFormGenerator.py (wiring in create_tasks(), arming only
+        # after, in write_waveforms_to_tasks()).
 
         print(f"Configuring the full trigger chain (n_planes={args.n_planes})...")
         chain = configure_zstack_trigger_chain(
@@ -152,6 +200,8 @@ def main():
             z_in0_bnc=args.z_in0_bnc, z_out0_bnc=args.z_out0_bnc,
             counter_monitor_bnc=args.counter_monitor_bnc,
         )
+        print("Arming ETL for external trigger, now that the real wiring is established...")
+        etl.arm_triggered(free_running=False)
 
         start_pos = read_position_robust(chain.z)
         if start_pos is None:
@@ -160,12 +210,32 @@ def main():
         print(f"\nStart position: {start_pos}.")
 
         chain.reset()
+        # Diagnostic for the "inconsistent completion" report: is_complete() should be
+        # False here, BEFORE any kick has happened at all. If it's ever True at this
+        # point, the latch cell wasn't actually cleared by reset() (a stale "done" from
+        # an EARLIER run) -- wait_until_complete() would then report done immediately,
+        # before the real loop has done anything, explaining exactly this kind of
+        # inconsistency (works when the latch happens to be clear, fails when it isn't).
+        latch_clear = not chain.is_complete()
+        print(f"Diagnostic: latch clear immediately after reset(), before kick()? {latch_clear}"
+              + ("" if latch_clear else "  **UNEXPECTED -- latch already reads 'complete' "
+                                          "before this run's kick has even fired**"))
         print("Firing kick -- the loop is now FULLY AUTONOMOUS (camera, ETL, and Z all "
               "participating, no host involvement until it finishes)...")
         chain.kick()
 
-        print(f"Waiting {total_wait:.0f}s for the loop to complete on its own...")
-        time.sleep(total_wait)
+        print(f"Polling for real completion (latch cell, timeout bound {timeout_s:.0f}s)...")
+        completed = chain.wait_until_complete(timeout_s=timeout_s, poll_interval_s=args.poll_interval_s,
+                                               final_frame_settle_s=args.final_frame_settle_s)
+        if not completed:
+            print(f"WARNING: did not detect completion within {timeout_s:.0f}s -- the loop may "
+                  f"still be running. Proceeding to disarm and check anyway.")
+
+        # Diagnostic: latch state and countdown right before disarm, independent of the
+        # position check below -- distinguishes "reported done but position was wrong"
+        # from "never reported done at all" when something goes wrong.
+        print(f"Diagnostic: latch reports complete = {chain.is_complete()}, "
+              f"planes_remaining() = {chain.planes_remaining()}")
 
         # Disarm FIRST (stops Z's trigger response), THEN take a settled clean reading --
         # same reasoning as the precise trigger-count test: don't trust a read taken while
@@ -193,11 +263,12 @@ def main():
                   f"for {args.n_planes} planes. Step 4 (final step) of the staged test plan is DONE.")
         else:
             print(f"MISMATCH: {diff:+.2f} unaccounted for ({diff/args.z_step:+.1f} steps' worth). "
-                  f"Worth checking: did the loop actually stop on its own (watch the camera / a "
-                  f"scope on --counter-monitor-bnc next time to see when it blocks), or could it "
-                  f"still be running past this script's fixed wait? Try a longer "
-                  f"--seconds-per-plane-estimate if so, and re-run to isolate whether this is a "
-                  f"timing issue with THIS SCRIPT's wait, or a genuine loop problem.")
+                  f"Worth checking: was wait_until_complete() reported as completed above, or did "
+                  f"it warn about timing out? If it timed out, the latch cell never went high -- "
+                  f"worth checking with tools/asi_tiger_counter_state_test.py whether the counter "
+                  f"logic itself is behaving as expected, independent of the rest of this loop. If "
+                  f"it DID report completion correctly, this mismatch is a genuine displacement "
+                  f"problem, not a timing/detection issue.")
 
     except KeyboardInterrupt:
         print("\nInterrupted.")

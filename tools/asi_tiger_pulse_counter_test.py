@@ -2,11 +2,14 @@
 """
 asi_tiger_pulse_counter_test.py
 ==================================
-Bench-tests PLCCard.configure_pulse_pass_through_counter() -- "pass an
-incoming pulse through exactly N times, then block until reset" --
-a faithful port of ASI's own documented, customer-tested example
+Bench-tests PLCCard.configure_pulse_pass_through_counter_single() --
+"pass an incoming pulse through exactly N times, then block until
+reset" -- derived from ASI's own documented, customer-tested example
 ("Pass through pulse N*M times",
-https://www.asiimaging.com/docs/tiger_programmable_logic_card#pass_through_pulse_nm_times).
+https://www.asiimaging.com/docs/tiger_programmable_logic_card#pass_through_pulse_nm_times),
+using a single one-shot counter (this project's realistic plane counts
+fit well within one counter's 65535-pulse range, so the extra cascaded
+stage in ASI's original two-counter example isn't needed here).
 
 STAGE 1 (this script): pure software validation, zero external wiring.
 Uses a PLC cell (manually toggled via CCA F, the same confirmed-working
@@ -28,8 +31,8 @@ SAFETY: this only touches PLC logic -- no stage motion, no DAC output.
 Nothing physical moves. Safe to run repeatedly.
 
 Usage:
-    python tools/asi_tiger_pulse_counter_test.py --port COM4 --n-inner 2 --n-outer 2
-    python tools/asi_tiger_pulse_counter_test.py --port COM4 --n-inner 3 --n-outer 4 --extra-pulses 5
+    python tools/asi_tiger_pulse_counter_test.py --port COM4 --n-pulses 200
+    python tools/asi_tiger_pulse_counter_test.py --port COM4 --n-pulses 5 --extra-pulses 5
 """
 
 import argparse
@@ -71,35 +74,22 @@ def main():
     parser.add_argument("--plc-axis", default="E")
     parser.add_argument("--pulse-source-cell", type=int, default=10,
                          help="PLC cell used as the manual 'incoming pulse' source for this "
-                              "software-only test (default 10 -- avoids the counter's own cells 1-6)")
+                              "software-only test (default 10 -- avoids the counter's own cells 1-5)")
     parser.add_argument("--pulse-out-bnc", type=int, default=8,
                          help="BNC to route the gated output to (not read back by this script, "
                               "just configured -- optionally watch it on a scope too)")
-    parser.add_argument("--single", action="store_true",
-                         help="Use the single-counter circuit (configure_pulse_pass_through_counter_single) "
-                              "instead of the two-counter n_inner*n_outer version -- recommended whenever "
-                              "the target count fits in one 16-bit one-shot (up to 65535), since it has no "
-                              "prime-N gap (only N=1 is excluded, vs. any prime N for the two-counter form).")
     parser.add_argument("--n-pulses", type=int, default=200,
-                         help="Target pass-through count when --single is used")
-    parser.add_argument("--n-inner", type=int, default=2, help="Only used without --single")
-    parser.add_argument("--n-outer", type=int, default=2, help="Only used without --single")
+                         help="Target pass-through count")
     parser.add_argument("--extra-pulses", type=int, default=4,
                          help="How many pulses PAST the target count to send, to confirm blocking")
     parser.add_argument("--skip-reset-test", action="store_true")
     args = parser.parse_args()
 
-    if args.single:
-        n_total = args.n_pulses
-        and_cell = 5  # 5th (last) cell in configure_pulse_pass_through_counter_single's default cells=(1,2,3,4,5)
-        print(f"Testing configure_pulse_pass_through_counter_single(n_pulses={n_total}) -- single counter")
-    else:
-        n_total = args.n_inner * args.n_outer
-        and_cell = 6  # 6th (last) cell in configure_pulse_pass_through_counter's default cells=(1,2,3,4,5,6)
-        print(f"Testing configure_pulse_pass_through_counter(n_inner={args.n_inner}, n_outer={args.n_outer}) "
-              f"-> target count = {n_total}")
+    n_total = args.n_pulses
+    and_cell = 5  # 5th (last) cell in configure_pulse_pass_through_counter_single's default cells=(1,2,3,4,5)
     n_pulses = n_total + args.extra_pulses
 
+    print(f"Testing configure_pulse_pass_through_counter_single(n_pulses={n_total})")
     print("Pure software test -- a PLC cell simulates the incoming pulse, RDADC reads the result. "
           "No wiring, nothing physical moves.")
 
@@ -116,19 +106,11 @@ def main():
         plc.configure_cell(src, "d_flop", inputs={"a": 0, "b": 0, "c": 0})
         plc.set_cell_state(src, False)
 
-        if args.single:
-            plc.configure_pulse_pass_through_counter_single(
-                pulse_in_addr=cell_addr(src),
-                pulse_out_bnc=args.pulse_out_bnc,
-                n_pulses=args.n_pulses,
-            )
-        else:
-            plc.configure_pulse_pass_through_counter(
-                pulse_in_addr=cell_addr(src),
-                pulse_out_bnc=args.pulse_out_bnc,
-                n_inner=args.n_inner,
-                n_outer=args.n_outer,
-            )
+        plc.configure_pulse_pass_through_counter_single(
+            pulse_in_addr=cell_addr(src),
+            pulse_out_bnc=args.pulse_out_bnc,
+            n_pulses=args.n_pulses,
+        )
         plc.reset_pulse_pass_through_counter()
 
         main_ok = run_pulses(plc, src, and_cell, n_pulses, n_total, "Main test")

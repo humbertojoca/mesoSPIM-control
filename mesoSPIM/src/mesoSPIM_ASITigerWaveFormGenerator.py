@@ -2,51 +2,118 @@
 mesoSPIM_ASITigerWaveFormGenerator
 ====================================
 A drop-in alternative to mesoSPIM_WaveFormGenerator (NI-DAQmx) backed by
-the asi_tiger library (ASI Tiger DAC + PLC cards) instead of an NI card.
+the asi_tiger library (ASI Tiger DAC/PLC/ETL cards) instead of an NI
+card.
 
-DESIGN: this subclasses mesoSPIM_WaveFormGenerator and overrides ONLY the
-hardware I/O methods (config_check, create_tasks, write_waveforms_to_tasks,
-start_tasks, run_tasks, stop_tasks, close_tasks). All of the actual
-waveform MATH -- create_waveforms(), create_etl_waveforms(),
-create_galvo_waveforms(), create_laser_waveforms(),
-bundle_galvo_and_etl_waveforms(), state_request_handler() -- is inherited
-unchanged from the parent class, since none of it touches nidaqmx. This
-mirrors exactly how mesoSPIM_DemoWaveFormGenerator is already structured
-in mesoSPIM_WaveFormGenerator.py -- look at that class alongside this one.
+DESIGN: subclasses mesoSPIM_WaveFormGenerator and overrides ONLY the 6
+hardware I/O methods (create_tasks, write_waveforms_to_tasks,
+start_tasks, run_tasks, stop_tasks, close_tasks) plus config_check --
+mirroring exactly how mesoSPIM_DemoWaveFormGenerator is structured in
+mesoSPIM_WaveFormGenerator.py.
 
 ======================================================================
-READ BEFORE USING ON REAL HARDWARE -- BANDWIDTH CAVEAT
+ARCHITECTURE NOTE -- READ BEFORE TRUSTING THIS FOR REAL ACQUISITIONS
 ======================================================================
-mesoSPIM's default timing (samplerate=100000 Hz, sweeptime=0.2s) means
-20,000 analog samples per frame on the NI card. ASI's SIGNAL_DAC_4CH
-card has a hard 4 kHz refresh ceiling -- 800 samples/sweep even with a
-confirmed hardware-triggered ring-buffer playback mode, which this
-class does NOT implement yet (see _stream_dac_waveforms below). What
-IS implemented is a software-timed serial loop, realistically ~100 Hz,
-i.e. ~20 samples/sweep. That is fine for confirming wiring and trigger
-logic, but is NOT adequate for real galvo/ETL scanning -- you will see
-visible stepping/banding.
+TRUE PER-FRAME TRIGGERING, matching the original NI design's
+granularity exactly -- NOT the autonomous, hardware-driven multi-plane
+loop this project built and validated (zstack_chain, PATTERN_SAWTOOTH
+ETL sync, the pulse-pass-through counter, all still fully working,
+still hardware-confirmed at n_planes=3 and 300). That capability is
+DELIBERATELY POSTPONED, not abandoned -- see "WHY NOT zstack_chain, FOR
+NOW" below.
 
-Recommended path, in order of effort:
-  1. Use this class for the PLC-driven parts NOW (master trigger,
-     camera trigger, stage trigger, laser gating) -- those are genuine,
-     confident wins: hardware-deterministic, host out of the timing
-     loop, already validated against ASI's documented command set.
-  2. Keep a small/cheap NI multifunction card (e.g. USB-6001, 4 AO
-     channels is overkill -- even a 2-channel card covers galvo L/R,
-     add ETL via a 2nd cheap card or accept ETL on ASI DAC since its
-     ramp is much less demanding than the galvo sawtooth) for the
-     genuinely fast analog channels, OR
-  3. Confirm ASI's ring-buffer/TTL-triggered playback mode for
-     SIGNAL_DAC_4CH (test empirically -- see asi_tiger README) and
-     implement _stream_dac_waveforms() properly with it. At 4 kHz
-     that's still 25x fewer samples than NI, so validate on your
-     actual optics before trusting it for production acquisitions.
+Each run_tasks() call here does real work: fires one camera trigger
+pulse, waits for that one exposure to start and finish (polling the
+camera's real Expose-Out signal), and returns. Z (and F) stepping is
+NOT this file's job at all -- mesoSPIM's own existing, already-working
+per-frame host-stepping loop (run_acquisition()'s move_relative() call
+each iteration, via the existing ASI stage driver) handles it, entirely
+unchanged. This REQUIRES ttl_movement_enabled_during_acq to be FALSE
+for rows run with this backend -- the opposite of what an earlier
+version of this file required. config_check() warns if
+asi_parameters['ttl_motion_enabled'] is set, since that would disable
+mesoSPIM's own per-frame stepping loop that this design depends on.
+
+WHY NOT zstack_chain, FOR NOW: run_tasks() blocking for an entire row
+(zstack_chain's actual design) is fundamentally incompatible with how
+mesoSPIM retrieves frames. Confirmed directly from mesoSPIM_Camera.py:
+add_images_to_series() -> self.camera.get_images_in_series() ->
+(for the Photometrics camera this project targets)
+self.pvcam.poll_frame(), which pulls from the camera's OWN hardware
+buffer. That buffer is FIXED SIZE and, per PyVCAM's own source
+(pvcmodule.cpp's NewFrameHandler -- confirmed directly, not assumed),
+pops and silently DISCARDS the oldest unread frame once full ("Lost
+frame"), with no exception or signal the Python side can catch.
+mesoSPIM_Camera.py's initialize_image_series() calls
+self.pvcam.start_live() with no explicit buffer size, so it's using
+PyVCAM's small, live-view-oriented default -- not sized to hold a
+whole row's frames. If run_tasks() blocks for the WHOLE stack before
+any poll_frame() call happens (zstack_chain's actual behavior), frames
+captured early in a row risk being silently overwritten before
+mesoSPIM's per-frame loop ever gets a chance to retrieve them. The
+Iris 15's real buffer depth via PVCAMTest looks like roughly 50 frames
+(reported, not yet independently confirmed here) -- not a niche
+"very large stacks" concern, a real limit on ordinary row sizes.
+
+The fix for THAT, if the autonomous design is revisited later: either
+size PyVCAM's buffer to the row's real frame count (touches
+mesoSPIM_Camera.py, not just this file) or chunk zstack_chain's kicks
+to the camera's actual buffer depth, letting mesoSPIM's per-frame loop
+drain each chunk before kicking the next. Neither is implemented here.
+True per-frame triggering sidesteps the whole problem: each frame is
+polled immediately after being triggered, exactly matching what
+mesoSPIM's frame-grabbing loop already expects, with no buffer
+accumulation risk at all -- at the cost of losing the "no host
+overhead during the fast per-frame loop" benefit that motivated
+zstack_chain in the first place. That trade was made deliberately, to
+get a working mesoSPIM-control + ASI Tiger integration built and
+running first; zstack_chain.py itself is untouched and still fully
+available once it's worth revisiting.
+
+CONFIRMED FROM THE REAL mesoSPIM_Core.py, mesoSPIM_Stages.py,
+asicontrol.py, utils/acquisitions.py, and mesoSPIM_Camera.py (fetched
+and read directly, or user-supplied -- not assumed or inferred),
+findings that still apply to THIS design:
+
+  Call pattern (unchanged from before): prepare_acquisition() calls
+  prepare_image_series() -- create_tasks() + write_waveforms_to_tasks(),
+  ONCE per row. run_acquisition()'s `for i in range(steps)` loop then
+  calls snap_image_in_series() EACH iteration (laser enable ->
+  start_tasks() -> run_tasks() -> stop_tasks() -> laser disable) --
+  once per frame. close_acquisition() calls close_image_series() --
+  close_tasks() -- ONCE, at the end. Every run_tasks() call in THIS
+  design does real, per-frame work (no "first call does everything,
+  rest no-op" pattern -- that was specific to the zstack_chain design).
+
+  Laser enable/disable is NOT this class's job -- run_acquisition()
+  calls self.laserenabler.enable(laser)/disable_all() on a SEPARATE
+  object mesoSPIM_Core instantiates independently
+  (mesoSPIM_LaserEnabler/Demo_LaserEnabler), the same pattern as
+  NI_Shutter/Demo_Shutter for shutters. This file never touches it.
+
+  Z's row-starting position is NOT this class's job either --
+  prepare_acquisition() already moves Z (and F) to the row's start via
+  self.serial_worker.stage (the existing stage driver) BEFORE it calls
+  prepare_image_series(). With ttl_movement_enabled_during_acq=False
+  (what THIS design requires), that SAME existing stage driver also
+  handles every per-frame Z/F step during run_acquisition(), via its
+  own already-working move_relative() call each iteration -- nothing
+  in this file needs to touch Z or F at all, for the row-start move OR
+  the per-frame stepping.
+
+  Laser intensity/selection: self.state['laser'] is the laser NAME
+  (matches cfg.laserdict's keys), self.state['intensity'] is 0-100%
+  (confirmed from set_intensity()'s docstring), converted to volts via
+  the already-validated max_laser_voltage. laser_dac_channels is
+  indexed the same order as cfg.laserdict's keys.
+
+Everything else (connection sharing, config validation, the
+close_tasks() PLC-safety note) follows established, straightforward
+patterns and carries less risk than the above.
 ======================================================================
 
-Config: expects a new `cfg.asi_dac_parameters` dict (see
-config_snippet.py in this folder) instead of (or alongside)
-`cfg.acquisition_hardware`.
+Config: expects a `cfg.asi_dac_parameters` dict -- see
+config_asi_tiger_example.py in mesoSPIM/config/examples/.
 """
 
 import logging
@@ -55,20 +122,34 @@ from typing import Optional
 
 from .mesoSPIM_WaveFormGenerator import mesoSPIM_WaveFormGenerator
 
-from .devices.asi_tiger import TigerController, ASITigerDAC, PLCCard, bnc_addr
-from .devices.asi_tiger.waveform import WaveformStreamer
+from .devices.asi_tiger import (
+    TigerController, ASITigerDAC, PLCCard, SingleAxisWaveform,
+    PATTERN_SAWTOOTH, enable_backplane_trigger_mode,
+    axis_slot_index, trigger_in_backplane_addr,
+    IO_TYPE_INPUT, IO_TYPE_PUSH_PULL_OUTPUT, cell_addr, bnc_addr,
+    configure_lr_switch,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
-    """See module docstring -- read the bandwidth caveat before using this
-    for real acquisitions, not just wiring/logic tests."""
+    """See module docstring -- true per-frame triggering, matching the
+    original NI design's granularity. Z/F stepping is NOT handled here
+    -- requires ttl_movement_enabled_during_acq=False so mesoSPIM's own
+    existing per-frame host-stepping loop does it instead."""
 
     def __init__(self, parent):
-        self._dac: Optional[ASITigerDAC] = None
-        self._plc: Optional[PLCCard] = None
+        self._tiger: Optional[TigerController] = None
         self._owns_tiger_connection = False
+        self._plc: Optional[PLCCard] = None
+        self._dac: Optional[ASITigerDAC] = None
+        self._etl: Optional[SingleAxisWaveform] = None
+        self._lr_switch = None  # LRSwitch
+
+        self._camera_trigger_cell = None
+        self._camera_expose_bnc = None
+
         super().__init__(parent)  # base __init__ calls self.config_check() at the end
 
     # ------------------------------------------------------------------
@@ -76,24 +157,31 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
     # ------------------------------------------------------------------
     def config_check(self):
         """ASI equivalent of the base class's config_check(). Validates
-        cfg.asi_dac_parameters instead of cfg.acquisition_hardware, but
-        keeps the same voltage safety clamps."""
+        cfg.asi_dac_parameters instead of cfg.acquisition_hardware."""
         assert hasattr(self.cfg, "asi_dac_parameters"), (
             "Config file must define 'asi_dac_parameters' when "
-            "waveformgeneration == 'ASI_Tiger'. See config_snippet.py."
+            "waveformgeneration == 'ASI_Tiger'. See config_asi_tiger_example.py."
         )
         ah = self.cfg.asi_dac_parameters
-        for key in ("port", "baudrate", "plc_card_addr", "galvo_etl_channels", "laser_channels"):
+        required = (
+            "port", "baudrate", "plc_card_addr",
+            "etl_card_addr", "etl_axis", "etl_card_first_axis",
+            "camera_expose_bnc", "camera_trigger_bnc",
+            "laser_dac_channels",
+        )
+        for key in required:
             if key not in ah:
                 raise ValueError(f"Config file: 'asi_dac_parameters' must contain {key!r}")
-        if len(ah["laser_channels"]) != len(self.cfg.laserdict):
+        # NOT z_card_addr/z_axis/z_axis_mask/z_in0_bnc/z_out0_bnc/laser_bncs here --
+        # this design touches neither Z (the existing stage driver's own per-frame
+        # stepping handles it) nor laser enable (mesoSPIM Core's own job).
+        if len(ah["laser_dac_channels"]) != len(self.cfg.laserdict):
             raise ValueError(
-                f"Config file: number of DAC channels in 'asi_dac_parameters[\"laser_channels\"]' "
-                f"({len(ah['laser_channels'])}) must equal num(lasers) in 'laserdict' "
+                f"Config file: len('asi_dac_parameters[\"laser_dac_channels\"]') "
+                f"({len(ah['laser_dac_channels'])}) must equal num(lasers) in 'laserdict' "
                 f"({len(self.cfg.laserdict)})."
             )
 
-        # Same safety clamps as the NI version -- keep them, they matter.
         if self.state["max_laser_voltage"] > 10:
             self.state["max_laser_voltage"] = 10
             msg = f"Config parameter 'max_laser_voltage' ({self.state['max_laser_voltage']}) is > 10V. Setting to 10V."
@@ -102,29 +190,37 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             msg = f"Config parameter 'max_laser_voltage' ({self.state['max_laser_voltage']}) is > 5V, may damage the laser controller."
             print(msg); logger.warning(msg)
 
+        ttl_enabled_in_cfg = False
+        try:
+            ttl_enabled_in_cfg = bool(self.cfg.asi_parameters.get("ttl_motion_enabled", False))
+        except AttributeError:
+            pass
+        if ttl_enabled_in_cfg:
+            logger.error(
+                "ASI Tiger backend (per-frame design): asi_parameters['ttl_motion_enabled'] is "
+                "True, but this design REQUIRES ttl_movement_enabled_during_acq to be False -- "
+                "it depends on mesoSPIM's own existing per-frame host-stepping loop for Z/F, "
+                "which that flag disables. Set ttl_motion_enabled to False, or this row's Z/F "
+                "position will not track the acquisition at all."
+            )
+
         logger.warning(
-            "ASI Tiger backend: DAC playback is software-timed (~100 Hz effective), "
-            "NOT hardware-clocked like NI. See this module's docstring before using "
-            "for real acquisitions, not just wiring/logic tests."
+            "ASI Tiger backend: true per-frame triggering (see this module's ARCHITECTURE "
+            "NOTE) -- each run_tasks() call fires one camera trigger and waits for that one "
+            "exposure. Z/F stepping is handled entirely by mesoSPIM's existing stage driver, "
+            "not this file -- requires ttl_motion_enabled=False in asi_parameters."
         )
 
     # ------------------------------------------------------------------
-    # Shared-connection lookup
+    # Shared-connection lookup (unchanged from earlier drafts -- avoids
+    # opening a second serial handle on the same COM port as mesoSPIM's
+    # own ASI stage driver, if present)
     # ------------------------------------------------------------------
     def _get_shared_tiger_connection(self) -> Optional[TigerController]:
-        """
-        If mesoSPIM's own ASI stage driver is already connected (i.e. the
-        stage_type in the config is an ASI type), reuse ITS serial
-        connection rather than opening a second handle on the same COM
-        port -- see asi_tiger.controller.TigerController.from_open_serial
-        for why this matters.
-
-        This assumes mesoSPIM's stage object exposes `.asi_stages.asi_connection`
-        (true for StageControlASI as of the current mesoSPIM_Stages.py) and
-        that the ASI stage and ASI DAC/PLC cards are on the same COM port.
-        If your stage is NOT ASI, or is on a different COM port, this
-        returns None and create_tasks() opens its own connection instead.
-        """
+        """See asi_tiger.controller.TigerController.from_open_serial for
+        why sharing matters. Returns None (create_tasks() opens its own
+        connection instead) if mesoSPIM's stage isn't ASI, or is on a
+        different COM port than asi_dac_parameters['port']."""
         try:
             stage = self.parent.serial_worker.stage
             asi_stages = getattr(stage, "asi_stages", None)
@@ -135,8 +231,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             if ser.port != ah["port"]:
                 logger.info(
                     f"ASI stage is on {ser.port}, asi_dac_parameters['port'] is "
-                    f"{ah['port']} -- different ports, opening a separate connection "
-                    f"for the DAC/PLC cards."
+                    f"{ah['port']} -- different ports, opening a separate connection."
                 )
                 return None
             return TigerController.from_open_serial(ser)
@@ -144,153 +239,210 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             return None
 
     # ------------------------------------------------------------------
-    # PLC trigger/gating setup -- run ONCE, not per frame
-    # ------------------------------------------------------------------
-    def _configure_plc_triggers(self):
-        """
-        Programs the PLC's master/camera trigger and laser gating logic.
-        Runs once when the connection is (re)established, not on every
-        frame -- unlike write_waveforms_to_tasks(), which does run every
-        frame with fresh voltage values.
-
-        ADAPT THIS to your actual BNC/backplane wiring -- the addresses
-        below (BNC1 in, BNC5/6 out) are placeholders matching the earlier
-        two-laser-toggle example, not a universal default.
-        """
-        ah = self.cfg.asi_dac_parameters
-        camera_trigger_in = ah.get("plc_camera_trigger_bnc")  # e.g. 1
-        laser_bncs = ah.get("plc_laser_bncs")                  # e.g. (5, 6)
-
-        if camera_trigger_in and laser_bncs and len(laser_bncs) == 2:
-            self._plc.configure_two_laser_toggle(
-                trigger_source_addr=bnc_addr(camera_trigger_in),
-                laser0_bnc=laser_bncs[0],
-                laser1_bnc=laser_bncs[1],
-            )
-            logger.info(
-                f"PLC: 2-laser toggle configured (trigger BNC{camera_trigger_in} -> "
-                f"laser0 BNC{laser_bncs[0]}, laser1 BNC{laser_bncs[1]}). "
-                f"Verify with a scope before trusting with real laser hardware."
-            )
-        else:
-            logger.info("PLC: no plc_camera_trigger_bnc/plc_laser_bncs configured -- skipping laser-toggle setup.")
-
-    # ------------------------------------------------------------------
     # The 6 overridden hardware I/O methods
     # ------------------------------------------------------------------
     def create_tasks(self):
-        """ASI equivalent of NI task creation. Opens (or reuses) the
-        Tiger connection and registers DAC channels + PLC config. Safe
-        to call multiple times -- only does real work the first time."""
-        self.calculate_samples()
+        """Opens (or reuses) the Tiger connection and instantiates the
+        persistent device wrappers, INCLUDING the manual camera-trigger
+        cell and the camera-expose -> ETL-sync wiring this per-frame
+        design needs. Safe to call multiple times -- only does real
+        work the first time."""
+        if self._tiger is not None:
+            return
+
         ah = self.cfg.asi_dac_parameters
-
-        if self._dac is not None:
-            return  # already set up -- write_waveforms_to_tasks() handles per-frame updates
-
         shared = self._get_shared_tiger_connection()
         if shared is not None:
-            tiger = shared
+            self._tiger = shared
             self._owns_tiger_connection = False
-            logger.info("ASI Tiger DAC/PLC: reusing the ASI stage driver's serial connection.")
+            logger.info("ASI Tiger: reusing the ASI stage driver's serial connection.")
         else:
-            tiger = TigerController(ah["port"], baudrate=ah["baudrate"])
-            tiger.connect()
+            self._tiger = TigerController(ah["port"], baudrate=ah["baudrate"])
+            self._tiger.connect()
             self._owns_tiger_connection = True
-            logger.info(f"ASI Tiger DAC/PLC: opened its own connection on {ah['port']}.")
+            logger.info(f"ASI Tiger: opened its own connection on {ah['port']}.")
 
-        self._dac = ASITigerDAC(tiger=tiger)
-        for ch in ah["galvo_etl_channels"] + ah["laser_channels"]:
-            self._dac.add_channel(**ch)
-        self._dac.zero_all()  # mandatory: SIGNAL_DAC can surge to -10V on power-up
-
-        self._plc = PLCCard(tiger, card_addr=ah["plc_card_addr"], axis=ah.get("plc_axis", "E"))
+        self._plc = PLCCard(self._tiger, card_addr=ah["plc_card_addr"], axis=ah.get("plc_axis", "E"))
         self._plc.clear_state()
-        self._configure_plc_triggers()
 
-        self._galvo_etl_names = [ch["name"] for ch in ah["galvo_etl_channels"]]
-        self._laser_names = [ch["name"] for ch in ah["laser_channels"]]
+        self._dac = ASITigerDAC(tiger=self._tiger)
+        for ch in ah["laser_dac_channels"]:
+            self._dac.add_channel(**ch)
+        self._dac.zero_all()
+
+        self._etl = SingleAxisWaveform(self._tiger, card_addr=ah["etl_card_addr"], axis=ah["etl_axis"])
+        self._etl.stop_and_zero()
+        enable_backplane_trigger_mode(self._tiger, card_addr=ah["etl_card_addr"])
+
+        if ah.get("lr_switch_card_addr") is not None:
+            self._lr_switch = configure_lr_switch(
+                self._dac, card_addr=ah["lr_switch_card_addr"], axis=ah["lr_switch_axis"],
+                left_v=ah.get("lr_switch_left_v", 0.0), right_v=ah.get("lr_switch_right_v", 5.0),
+                range_code=ah.get("lr_switch_range_code", 2),
+            )
+
+        # Manual camera-trigger cell: the same confirmed-on-real-hardware pattern as
+        # tools/asi_tiger_camera_trigger_test.py -- a manually-toggled D-flop cell
+        # driving camera_trigger_bnc as a push-pull output.
+        self._camera_trigger_cell = ah.get("camera_trigger_cell", 10)
+        self._plc.configure_cell(self._camera_trigger_cell, "d_flop", inputs={"a": 0, "b": 0, "c": 0})
+        self._plc.set_cell_state(self._camera_trigger_cell, False)
+        self._plc.configure_io(bnc_addr(ah["camera_trigger_bnc"]), IO_TYPE_PUSH_PULL_OUTPUT,
+                                source_addr=cell_addr(self._camera_trigger_cell))
+
+        # Camera Expose-Out readback + ETL sync: the same confirmed-on-real-hardware
+        # wiring zstack_chain.py uses internally (raw level, not a PLC-computed edge --
+        # see that module's docstring for why), extracted here since this design needs
+        # it WITHOUT the rest of zstack_chain's Z/counter machinery.
+        self._camera_expose_bnc = ah["camera_expose_bnc"]
+        expose_addr = bnc_addr(self._camera_expose_bnc)
+        self._plc.configure_io(expose_addr, IO_TYPE_INPUT)
+        etl_slot = axis_slot_index(ah["etl_axis"], ah["etl_card_first_axis"])
+        etl_trigger_addr = trigger_in_backplane_addr(etl_slot)
+        self._plc.configure_io(etl_trigger_addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=expose_addr)
 
     def write_waveforms_to_tasks(self):
         """
-        Downsamples the (already-computed, full-resolution) galvo/etl/
-        laser numpy arrays from create_waveforms() to a rate the ASI
-        DAC's software-timed loop can actually keep up with, and stages
-        them for run_tasks() to stream. See module docstring: this is
-        the part that's NOT hardware-clocked yet.
+        Configures this row's specifics -- ETL amplitude/offset, laser
+        intensity, L/R side. Runs once per row (mesoSPIM's own call
+        pattern guarantees this, confirmed from mesoSPIM_Core.py -- see
+        ARCHITECTURE NOTE). Does NOT touch Z/F or laser enable/disable
+        -- both confirmed to be someone else's job, see ARCHITECTURE
+        NOTE.
+
+        Reads ETL amplitude/offset from self.state (populated by the
+        INHERITED create_waveforms()/create_etl_waveforms(), unchanged
+        from the base class) rather than computing them independently,
+        so any calibration/adjustment logic living in the base class's
+        waveform math is correctly reflected here rather than silently
+        bypassed.
+
+        CONFIGURES AND ARMS the ETL here, ONCE per row -- NOT per frame
+        (an earlier version of this file armed in start_tasks() and
+        stopped/zeroed in stop_tasks(), every frame). CONFIRMED ON REAL
+        HARDWARE this was a real bug: external-trigger arming
+        (SAM=2-style) auto-rearms on every subsequent trigger edge on
+        its own -- already confirmed earlier in this project ("SAM=2
+        DOES auto-rearm"), so re-arming every frame was both
+        unnecessary and a real source of the intermittent "Expose-Out
+        never went high" failures seen on real hardware -- re-arming
+        via a serial command immediately before firing the next trigger
+        pulse creates exactly the kind of race that would explain
+        failures on a random frame, not a fixed one. Armed once here,
+        left armed for the whole row, disarmed once in close_tasks().
         """
-        target_rate = self.cfg.asi_dac_parameters.get("software_stream_rate_hz", 50)
-        samplerate = self.state["samplerate"]
-        step = max(1, int(round(samplerate / target_rate)))
+        ah = self.cfg.asi_dac_parameters
+        side = self.state.get("shutterconfig", "Left")
 
-        arrays = {}
-        for i, name in enumerate(self._galvo_etl_names):
-            arrays[name] = self.galvo_and_etl_waveforms[i][::step]
-        for i, name in enumerate(self._laser_names):
-            arrays[name] = self.laser_waveforms[i][::step]
+        # Laser intensity: self.state['intensity'] is 0-100% (per mesoSPIM_Core.set_intensity()'s
+        # own docstring), NOT a voltage -- convert using max_laser_voltage, already
+        # validated/clamped in config_check(). laser_dac_channels is indexed the same
+        # order as cfg.laserdict's keys -- confirm that ordering matches your config
+        # (not independently verified here).
+        laser_name = self.state.get("laser")
+        laser_idx = list(self.cfg.laserdict.keys()).index(laser_name) if laser_name in self.cfg.laserdict else 0
+        intensity_pct = self.state.get("intensity", 0)
+        voltage = (intensity_pct / 100.0) * self.state["max_laser_voltage"]
+        dac_ch = ah["laser_dac_channels"][laser_idx]["name"]
+        self._dac.set_voltage(dac_ch, voltage)
 
-        self._staged_waveforms = arrays
-        self._staged_rate = samplerate / step
-        logger.debug(
-            f"ASI Tiger DAC: staged {len(arrays)} channels at ~{self._staged_rate:.1f} Hz "
-            f"({len(next(iter(arrays.values())))} samples) -- see bandwidth caveat in module docstring."
-        )
+        if self._lr_switch is not None:
+            self._lr_switch.select(is_right=(side == "Right"))
+
+        etl_amp = self.state.get(f"etl_{'l' if side == 'Left' else 'r'}_amplitude", 0.0)
+        etl_off = self.state.get(f"etl_{'l' if side == 'Left' else 'r'}_offset", 0.0)
+        etl_period_ms = ah.get("etl_period_ms", 120.0)
+        self._etl.configure(pattern=PATTERN_SAWTOOTH, amplitude_v=etl_amp, offset_v=etl_off,
+                             period_ms=etl_period_ms, external_trigger=True)
+        self._etl.arm_triggered(free_running=False)
 
     def start_tasks(self):
-        """No separate 'arm' step needed for the software-timed path --
-        streaming begins in run_tasks()."""
+        """No-op for this design -- the ETL is armed once per row in
+        write_waveforms_to_tasks(), not per frame. See that method's
+        docstring for why (a real bug, confirmed on real hardware, in
+        an earlier version that re-armed here every frame). Exists
+        because the base class's call pattern expects this method."""
         pass
 
     def run_tasks(self):
         """
-        Fires the camera trigger via the PLC, then streams the staged
-        waveforms to the DAC channels (software-timed -- see caveat).
-        Blocks until the sweep finishes, mirroring the NI version's
-        wait_until_done() behavior.
+        Fires ONE camera trigger pulse and waits for that ONE exposure
+        to start, then finish -- polling the camera's real Expose-Out
+        signal via the PLC (read_bnc_inputs(), the same reliable
+        mechanism used throughout this project for reading PLC/BNC
+        state -- never shown the WHERE-during-active-triggering
+        reliability issue, since this reads PLC logic/IO state, not an
+        axis's busy status).
+
+        Two-phase wait, not one: first for Expose-Out to go HIGH
+        (confirms the camera actually started exposing, not just that
+        the trigger pulse was sent), then for it to go LOW (confirms
+        the exposure finished). Checking only for LOW immediately after
+        triggering would risk reading the PRE-trigger idle state as
+        "already done".
         """
         ah = self.cfg.asi_dac_parameters
-        camera_trigger_cell = ah.get("plc_camera_trigger_cell")
-        if camera_trigger_cell is not None:
-            self._plc.set_cell_state(camera_trigger_cell, True)
-            time.sleep(0.001)
-            self._plc.set_cell_state(camera_trigger_cell, False)
+        pulse_ms = ah.get("camera_trigger_pulse_ms", 10.0)
+        expose_bit = 1 << (self._camera_expose_bnc - 1)
 
-        streamer = WaveformStreamer(
-            self._dac, self._staged_waveforms, sample_rate=self._staged_rate, loop=False
-        )
-        done = {"finished": False}
-        streamer.on_finished = lambda: done.update(finished=True)
-        streamer.on_error = lambda msg: logger.error(f"ASI Tiger DAC streaming error: {msg}")
-        streamer.start()
-        while not done["finished"]:
-            time.sleep(0.01)
-        self._last_achieved_rate = streamer.achieved_rate_hz
+        self._plc.set_cell_state(self._camera_trigger_cell, True)
+        time.sleep(pulse_ms / 1000.0)
+        self._plc.set_cell_state(self._camera_trigger_cell, False)
+
+        start_timeout_s = ah.get("camera_expose_start_timeout_s", 2.0)
+        start = time.perf_counter()
+        while time.perf_counter() - start < start_timeout_s:
+            if self._plc.read_bnc_inputs() & expose_bit:
+                break
+            time.sleep(0.001)
+        else:
+            logger.error(f"ASI Tiger: camera Expose-Out never went high within "
+                          f"{start_timeout_s:.1f}s of triggering -- exposure may not have "
+                          f"started. Proceeding anyway.")
+
+        exposure_time_s = self.state.get("camera_exposure_time", 0.5)
+        end_timeout_s = ah.get("camera_expose_end_timeout_margin_s", 2.0) + exposure_time_s
+        start = time.perf_counter()
+        while time.perf_counter() - start < end_timeout_s:
+            if not (self._plc.read_bnc_inputs() & expose_bit):
+                return
+            time.sleep(0.001)
+        logger.error(f"ASI Tiger: camera Expose-Out never went low within "
+                      f"{end_timeout_s:.1f}s -- exposure may still be in progress. "
+                      f"Proceeding anyway.")
 
     def stop_tasks(self):
-        """Nothing persistent to stop for the software-timed path (the
-        streamer already finished in run_tasks())."""
+        """No-op for this design -- see start_tasks()'s docstring. The
+        ETL stays armed for the whole row; close_tasks() stops/zeros it
+        once, at the actual end."""
         pass
 
     def close_tasks(self):
         """
-        Zeros all DAC outputs AND safes all PLC outputs (laser toggle,
-        camera trigger, etc. configured in _configure_plc_triggers()).
+        Stops/zeros the ETL (armed once per row in
+        write_waveforms_to_tasks(), see that method's docstring), THEN
+        safes all PLC outputs and zeros the DAC BEFORE disconnecting.
 
-        IMPORTANT: the PLC keeps running its programmed logic in hardware
-        regardless of the host connection -- confirmed on real hardware
-        that a 2-laser toggle kept switching on every camera trigger well
-        after the controlling process exited. plc.clear_state() (HOME)
-        does NOT stop this; only reconfiguring the physical outputs back
-        to inputs does (see asi_tiger/plc.py docstrings for the full
-        explanation). This method does that via safe_all_outputs()
-        BEFORE zeroing the DAC and disconnecting, so a mesoSPIM session
-        ending (normally or via a crash caught by whatever wraps this)
-        actually leaves lasers/shutter/camera-trigger lines quiet.
+        IMPORTANT (carried over from earlier drafts, still true): the
+        PLC keeps running its programmed logic in hardware regardless of
+        the host connection -- confirmed on real hardware that a
+        configured toggle/gate kept switching well after the controlling
+        process exited. plc.clear_state() alone does NOT stop this; only
+        reconfiguring the physical outputs back to inputs does (see
+        asi_tiger/plc.py's docstrings). This method does that via
+        safe_all_outputs() BEFORE zeroing the DAC and disconnecting, so a
+        mesoSPIM session ending (normally or via a crash caught by
+        whatever wraps this) actually leaves lasers/switch/camera-trigger
+        lines quiet.
 
         Does NOT close the shared serial connection if it's owned by the
-        ASI stage driver -- only closes it if this instance opened it
-        itself.
+        ASI stage driver -- only closes it if this instance opened it.
         """
+        if self._etl is not None:
+            try:
+                self._etl.stop_and_zero()
+            except Exception as exc:
+                logger.error(f"ASI Tiger ETL: error stopping/zeroing on close: {exc}")
         if self._plc is not None:
             try:
                 self._plc.safe_all_outputs()
@@ -301,7 +453,12 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
                 self._dac.zero_all()
             except Exception as exc:
                 logger.error(f"ASI Tiger DAC: error zeroing on close: {exc}")
-            if self._owns_tiger_connection:
-                self._dac.tiger.disconnect()
-            self._dac = None
-            self._plc = None
+        if self._owns_tiger_connection and self._tiger is not None:
+            self._tiger.disconnect()
+        self._tiger = None
+        self._plc = None
+        self._dac = None
+        self._etl = None
+        self._lr_switch = None
+        self._camera_trigger_cell = None
+        self._camera_expose_bnc = None
