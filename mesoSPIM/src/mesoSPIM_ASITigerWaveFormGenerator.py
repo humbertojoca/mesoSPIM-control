@@ -107,6 +107,70 @@ findings that still apply to THIS design:
   the already-validated max_laser_voltage. laser_dac_channels is
   indexed the same order as cfg.laserdict's keys.
 
+======================================================================
+GALVO + PER-ARM ETL -- added after the per-frame design above was
+already working end-to-end without them (see PATCHNOTES_ASI_TIGER.md).
+======================================================================
+Confirmed by the user directly (not assumed): the rack has TWO
+physically separate illumination arms, each with its OWN galvo scan
+mirror AND its own ETL -- not one shared pair switched optically. This
+matches the ORIGINAL config_asi_tiger_example.py's galvo_l/galvo_r
+(card 37, axes A/C) and etl_l/etl_r (card 34, axes H/J) channel
+mapping from earlier bench work, and corrects a real bug this file had
+until now: write_waveforms_to_tasks() was driving a SINGLE shared ETL
+axis (ah["etl_card_addr"]/ah["etl_axis"]) regardless of `side`, reading
+side-specific self.state keys (etl_l_amplitude vs etl_r_amplitude) but
+sending them to the same physical axis either way -- correct for
+amplitude/offset math, silently wrong for which physical lens actually
+moved. Both ETL and galvo now use genuinely separate per-side
+SingleAxisWaveform objects.
+
+Galvo state keys (confirmed from mesoSPIM_WaveFormGenerator.py's real
+source, fetched directly): self.state['galvo_l_frequency'/'_amplitude'/
+'_offset'/'_duty_cycle'/'_phase'] and the 'galvo_r_*' equivalents.
+'_phase' is NOT used here -- this hardware waveform generator has no
+phase-offset concept relative to anything else (galvo runs free,
+un-triggered, on its own internal clock -- there's nothing to phase
+against). '_duty_cycle' has no exact hardware equivalent either: the
+card offers fixed PATTERN_TRIANGLE/PATTERN_SAWTOOTH/etc. shapes, not a
+continuously-variable duty cycle. Approximated as PATTERN_TRIANGLE for
+duty_cycle in [0.4, 0.6] (a symmetric back-and-forth scan, matching
+asi_tiger_galvo_etl_demo.py's own default and rationale -- smoother, no
+flyback discontinuity) and PATTERN_SAWTOOTH otherwise. NOT yet
+confirmed on real hardware that this approximation is visually/
+optically acceptable for every duty_cycle mesoSPIM's GUI allows --
+worth checking if a strongly asymmetric ramp is ever actually used.
+
+Galvo is FREE-RUNNING (SAM=1 via start()), matching ASI's own confirmed
+architecture ("the idea is to use single-axis function on both the
+galvo and ETL DAC cards, where the galvo is free-running, and the etl
+sawtooth wave is triggered") and asi_tiger_galvo_etl_demo.py's
+bench-confirmed recipe -- started once per row in
+write_waveforms_to_tasks(), left running for the whole row (not
+per-frame -- there is no per-frame galvo action, unlike the camera
+trigger/ETL sweep), stopped once in close_tasks(). Re-configuring and
+restarting EVERY row (not just once, ever) is deliberate -- the user's
+own requirement, since amplitude/offset/frequency/side can all differ
+row to row.
+
+Galvo safety: mirrors asi_tiger_galvo_etl_demo.py's own pre-flight
+check (ASI's own limit: "Limit command voltage to +/-10.00V to
+guarantee galvo amplifier safety") -- amplitude/2 + abs(offset) is
+checked against asi_dac_parameters['galvo_max_volts'] (default 10.0V)
+BEFORE calling configure()/start(); if exceeded, logs an error and
+leaves that row's galvo un-driven (stopped, zeroed) rather than
+commanding an out-of-range voltage. Unlike the DAC's own DacChannel
+(ASITigerDAC), SingleAxisWaveform.configure() has NO built-in
+safety_limit_mv/max_step_v clamping of its own -- checked directly in
+singleaxis.py's source -- so this check is this file's own
+responsibility, not inherited protection from the library.
+
+Whichever side is NOT active for a given row has its galvo AND ETL
+explicitly stopped_and_zeroed at the START of write_waveforms_to_tasks()
+-- necessary because rows can alternate sides, and an axis armed/
+running for a PREVIOUS row's opposite side would otherwise be left
+running (galvo) or armed-and-triggerable (ETL) into the new row.
+
 Everything else (connection sharing, config validation, the
 close_tasks() PLC-safety note) follows established, straightforward
 patterns and carries less risk than the above.
@@ -124,7 +188,7 @@ from .mesoSPIM_WaveFormGenerator import mesoSPIM_WaveFormGenerator
 
 from .devices.asi_tiger import (
     TigerController, ASITigerDAC, PLCCard, SingleAxisWaveform,
-    PATTERN_SAWTOOTH, enable_backplane_trigger_mode,
+    PATTERN_SAWTOOTH, PATTERN_TRIANGLE, enable_backplane_trigger_mode,
     axis_slot_index, trigger_in_backplane_addr,
     IO_TYPE_INPUT, IO_TYPE_PUSH_PULL_OUTPUT, cell_addr, bnc_addr,
     configure_lr_switch,
@@ -144,7 +208,10 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         self._owns_tiger_connection = False
         self._plc: Optional[PLCCard] = None
         self._dac: Optional[ASITigerDAC] = None
-        self._etl: Optional[SingleAxisWaveform] = None
+        self._etl_l: Optional[SingleAxisWaveform] = None
+        self._etl_r: Optional[SingleAxisWaveform] = None
+        self._galvo_l: Optional[SingleAxisWaveform] = None
+        self._galvo_r: Optional[SingleAxisWaveform] = None
         self._lr_switch = None  # LRSwitch
 
         self._camera_trigger_cell = None
@@ -165,7 +232,8 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         ah = self.cfg.asi_dac_parameters
         required = (
             "port", "baudrate", "plc_card_addr",
-            "etl_card_addr", "etl_axis", "etl_card_first_axis",
+            "etl_card_addr", "etl_card_first_axis", "etl_l_axis", "etl_r_axis",
+            "galvo_card_addr", "galvo_l_axis", "galvo_r_axis",
             "camera_expose_bnc", "camera_trigger_bnc",
             "laser_dac_channels",
         )
@@ -175,6 +243,17 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         # NOT z_card_addr/z_axis/z_axis_mask/z_in0_bnc/z_out0_bnc/laser_bncs here --
         # this design touches neither Z (the existing stage driver's own per-frame
         # stepping handles it) nor laser enable (mesoSPIM Core's own job).
+        #
+        # etl_l_axis/etl_r_axis and galvo_l_axis/galvo_r_axis, NOT a single shared
+        # etl_axis/galvo_axis -- confirmed directly by the user: this rack has TWO
+        # physically separate illumination arms, each with its own galvo mirror and
+        # ETL, not one pair shared/switched optically. Assumes both L/R axes of each
+        # pair share ONE card (etl_card_addr / galvo_card_addr) -- true for the
+        # historical bench config (etl_l/etl_r on card 34's H/J, galvo_l/galvo_r on
+        # card 37's A/C) -- if your rack instead has them on DIFFERENT cards, this
+        # config shape and create_tasks()/close_tasks() below would need a
+        # galvo_l_card_addr/galvo_r_card_addr split too; not implemented, since
+        # nothing so far has indicated that's needed.
         if len(ah["laser_dac_channels"]) != len(self.cfg.laserdict):
             raise ValueError(
                 f"Config file: len('asi_dac_parameters[\"laser_dac_channels\"]') "
@@ -270,9 +349,28 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             self._dac.add_channel(**ch)
         self._dac.zero_all()
 
-        self._etl = SingleAxisWaveform(self._tiger, card_addr=ah["etl_card_addr"], axis=ah["etl_axis"])
-        self._etl.stop_and_zero()
+        # Per-arm ETL: two separate axes on (by assumption -- see config_check()'s
+        # docstring note) the same card. Both stopped/zeroed defensively at setup;
+        # only the active side's axis gets configured/armed per row, in
+        # write_waveforms_to_tasks().
+        self._etl_l = SingleAxisWaveform(self._tiger, card_addr=ah["etl_card_addr"], axis=ah["etl_l_axis"])
+        self._etl_r = SingleAxisWaveform(self._tiger, card_addr=ah["etl_card_addr"], axis=ah["etl_r_axis"])
+        self._etl_l.stop_and_zero()
+        self._etl_r.stop_and_zero()
         enable_backplane_trigger_mode(self._tiger, card_addr=ah["etl_card_addr"])
+
+        # Per-arm galvo: free-running (ASI's own confirmed architecture -- see
+        # this module's ARCHITECTURE NOTE), two separate axes, same assumption as
+        # the ETL pair above. Both stopped/zeroed here; started per row in
+        # write_waveforms_to_tasks(), since amplitude/offset/frequency/side can
+        # all change row to row (per the user's own requirement).
+        galvo_units_per_volt = ah.get("galvo_units_per_volt", 1000.0)
+        self._galvo_l = SingleAxisWaveform(self._tiger, card_addr=ah["galvo_card_addr"],
+                                            axis=ah["galvo_l_axis"], units_per_volt=galvo_units_per_volt)
+        self._galvo_r = SingleAxisWaveform(self._tiger, card_addr=ah["galvo_card_addr"],
+                                            axis=ah["galvo_r_axis"], units_per_volt=galvo_units_per_volt)
+        self._galvo_l.stop_and_zero()
+        self._galvo_r.stop_and_zero()
 
         if ah.get("lr_switch_card_addr") is not None:
             self._lr_switch = configure_lr_switch(
@@ -294,12 +392,85 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         # wiring zstack_chain.py uses internally (raw level, not a PLC-computed edge --
         # see that module's docstring for why), extracted here since this design needs
         # it WITHOUT the rest of zstack_chain's Z/counter machinery.
+        # Wired to BOTH ETL axes' backplane trigger-in, once, here -- not
+        # reconfigured per row when the active side changes. Only the active
+        # side's axis is actually ARMED for external trigger (in
+        # write_waveforms_to_tasks()); the inactive side stays stopped/zeroed, so
+        # it doesn't respond even though its trigger-in line is live. This avoids
+        # reconfiguring PLC I/O mid-session on every row (see PATCHNOTES_ASI_TIGER.md
+        # for why that reconfiguration path -- CCA Y/CCA Z ordering, revert-to-input
+        # floating -- turned out to be worth avoiding wherever a one-time setup
+        # can do the job instead).
         self._camera_expose_bnc = ah["camera_expose_bnc"]
         expose_addr = bnc_addr(self._camera_expose_bnc)
         self._plc.configure_io(expose_addr, IO_TYPE_INPUT)
-        etl_slot = axis_slot_index(ah["etl_axis"], ah["etl_card_first_axis"])
-        etl_trigger_addr = trigger_in_backplane_addr(etl_slot)
-        self._plc.configure_io(etl_trigger_addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=expose_addr)
+        for etl_axis_letter in (ah["etl_l_axis"], ah["etl_r_axis"]):
+            etl_slot = axis_slot_index(etl_axis_letter, ah["etl_card_first_axis"])
+            etl_trigger_addr = trigger_in_backplane_addr(etl_slot)
+            self._plc.configure_io(etl_trigger_addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=expose_addr)
+
+    def _etl_period_ms(self, ah) -> float:
+        """
+        The ETL's SAM=2 waveform period, in ms.
+
+        REAL-HARDWARE FINDING (from the user, after switching the camera's
+        readout mode to "All Rows"): Expose-Out's duration now equals the
+        REAL configured exposure time exactly, no longer the shorter,
+        rolling-shutter-derived pulse documented earlier in this project
+        ("one confirmed data point showed a 150ms exposure setting
+        producing a ~120ms Expose-Out pulse" -- see
+        asi_tiger_galvo_etl_demo.py's --etl-period-ms help text, which
+        predates this readout-mode change and no longer reflects reality
+        under "All Rows"). With Expose-Out now spanning the FULL exposure,
+        the ETL sweep should track the real exposure time directly, not a
+        separately hand-tuned constant that silently drifts out of sync
+        whenever the exposure setting changes (including row to row, since
+        mesoSPIM allows exposure to vary by channel).
+
+        Derives the period from self.state['camera_exposure_time'] (the
+        same key run_tasks() already uses for its own Expose-Out-low
+        timeout) MINUS a small safety margin
+        (asi_dac_parameters.get('etl_period_margin_ms', 0.0)) --
+        CONFIRMED ON REAL HARDWARE, separately, earlier in this project:
+        the ETL's period must be SHORTER than the camera's real trigger
+        interval, not equal to it -- SAM=2 must finish its cycle before
+        the next trigger edge arrives, or it misses every other trigger.
+        That finding was from the OLD rolling-shutter timing, where
+        Expose-Out was itself a separate, shorter, derived pulse with its
+        own jitter relative to the actual exposure window -- some margin
+        against IT made sense. Under "All Rows" (the mode now in use),
+        Expose-Out spans the exposure window directly and the camera's
+        own trigger-to-trigger interval already includes its readout
+        overhead beyond the exposure time itself, so there is no known
+        source of jitter left for a margin to protect against -- PER THE
+        USER, directly: "in reality, margin period is negligible if the
+        expose out is in 'all rows'". Default margin is therefore 0.0ms
+        (derived period = the real exposure time, exactly). The key is
+        left in place (not removed) as a manual escape hatch for a rack
+        or readout mode where some margin genuinely is still needed --
+        set asi_dac_parameters['etl_period_margin_ms'] explicitly if you
+        find one.
+
+        asi_dac_parameters['etl_period_ms'], if explicitly set, OVERRIDES
+        this derivation entirely (manual escape hatch, e.g. for a fixed
+        value independent of exposure time) -- the default (unset) is to
+        auto-derive as described above.
+        """
+        explicit = ah.get("etl_period_ms")
+        if explicit is not None:
+            return explicit
+        margin_ms = ah.get("etl_period_margin_ms", 0.0)
+        exposure_s = self.state.get("camera_exposure_time", 0.5)
+        period_ms = exposure_s * 1000.0 - margin_ms
+        if period_ms < 2.0:
+            logger.error(
+                f"ASI Tiger ETL: derived period ({period_ms:.1f}ms, from camera_exposure_time="
+                f"{exposure_s}s minus etl_period_margin_ms={margin_ms}ms) is too short to be "
+                f"meaningful (1ms is documented as undefined behavior for this firmware) -- "
+                f"clamping to 2ms. Check the real exposure time and/or etl_period_margin_ms."
+            )
+            period_ms = 2.0
+        return period_ms
 
     def write_waveforms_to_tasks(self):
         """
@@ -317,22 +488,30 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         waveform math is correctly reflected here rather than silently
         bypassed.
 
-        CONFIGURES AND ARMS the ETL here, ONCE per row -- NOT per frame
-        (an earlier version of this file armed in start_tasks() and
-        stopped/zeroed in stop_tasks(), every frame). CONFIRMED ON REAL
-        HARDWARE this was a real bug: external-trigger arming
-        (SAM=2-style) auto-rearms on every subsequent trigger edge on
-        its own -- already confirmed earlier in this project ("SAM=2
-        DOES auto-rearm"), so re-arming every frame was both
+        CONFIGURES AND ARMS the row's ACTIVE-side ETL here, ONCE per row
+        -- NOT per frame (an earlier version of this file armed in
+        start_tasks() and stopped/zeroed in stop_tasks(), every frame).
+        CONFIRMED ON REAL HARDWARE this was a real bug: external-trigger
+        arming (SAM=2-style) auto-rearms on every subsequent trigger
+        edge on its own -- already confirmed earlier in this project
+        ("SAM=2 DOES auto-rearm"), so re-arming every frame was both
         unnecessary and a real source of the intermittent "Expose-Out
         never went high" failures seen on real hardware -- re-arming
         via a serial command immediately before firing the next trigger
         pulse creates exactly the kind of race that would explain
         failures on a random frame, not a fixed one. Armed once here,
         left armed for the whole row, disarmed once in close_tasks().
+
+        ALSO configures and starts the row's ACTIVE-side galvo (free-
+        running -- see this module's ARCHITECTURE NOTE), and explicitly
+        quiesces whichever side is NOT active this row (both its ETL and
+        its galvo), since a previous row may have left the opposite side
+        armed/running.
         """
         ah = self.cfg.asi_dac_parameters
         side = self.state.get("shutterconfig", "Left")
+        letter = "l" if side == "Left" else "r"
+        other_letter = "r" if letter == "l" else "l"
 
         # Laser intensity: self.state['intensity'] is 0-100% (per mesoSPIM_Core.set_intensity()'s
         # own docstring), NOT a voltage -- convert using max_laser_voltage, already
@@ -349,12 +528,51 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         if self._lr_switch is not None:
             self._lr_switch.select(is_right=(side == "Right"))
 
-        etl_amp = self.state.get(f"etl_{'l' if side == 'Left' else 'r'}_amplitude", 0.0)
-        etl_off = self.state.get(f"etl_{'l' if side == 'Left' else 'r'}_offset", 0.0)
-        etl_period_ms = ah.get("etl_period_ms", 120.0)
-        self._etl.configure(pattern=PATTERN_SAWTOOTH, amplitude_v=etl_amp, offset_v=etl_off,
-                             period_ms=etl_period_ms, external_trigger=True)
-        self._etl.arm_triggered(free_running=False)
+        # --- Quiesce the INACTIVE side first (galvo AND ETL) -- a previous row may
+        # have left it armed/running for the opposite side. ---
+        etl_by_letter = {"l": self._etl_l, "r": self._etl_r}
+        galvo_by_letter = {"l": self._galvo_l, "r": self._galvo_r}
+        etl_by_letter[other_letter].stop_and_zero()
+        galvo_by_letter[other_letter].stop_and_zero()
+
+        # --- ETL: configure + arm the ACTIVE side only ---
+        active_etl = etl_by_letter[letter]
+        etl_amp = self.state.get(f"etl_{letter}_amplitude", 0.0)
+        etl_off = self.state.get(f"etl_{letter}_offset", 0.0)
+        etl_period_ms = self._etl_period_ms(ah)
+        active_etl.configure(pattern=PATTERN_SAWTOOTH, amplitude_v=etl_amp, offset_v=etl_off,
+                              period_ms=etl_period_ms, external_trigger=True)
+        active_etl.arm_triggered(free_running=False)
+
+        # --- Galvo: configure + start (free-running) the ACTIVE side only ---
+        active_galvo = galvo_by_letter[letter]
+        galvo_amp = self.state.get(f"galvo_{letter}_amplitude", 0.0)
+        galvo_off = self.state.get(f"galvo_{letter}_offset", 0.0)
+        galvo_freq = self.state.get(f"galvo_{letter}_frequency", 100.0)
+        galvo_duty = self.state.get(f"galvo_{letter}_duty_cycle", 0.5)
+
+        galvo_max_volts = ah.get("galvo_max_volts", 10.0)
+        galvo_peak = abs(galvo_amp) / 2 + abs(galvo_off)
+        if galvo_peak > galvo_max_volts:
+            logger.error(
+                f"ASI Tiger galvo ({side}): amplitude {galvo_amp}Vpp / offset {galvo_off}V gives a "
+                f"peak of {galvo_peak:.3f}V, exceeding galvo_max_volts ({galvo_max_volts}V, ASI's own "
+                f"amplifier safety limit). REFUSING to drive the galvo this row -- leaving it stopped "
+                f"and zeroed. The light sheet will NOT scan until this row's galvo parameters are "
+                f"within range."
+            )
+            return
+
+        galvo_period_ms = 1000.0 / galvo_freq if galvo_freq > 0 else self._etl_period_ms(ah)
+        # PATTERN_TRIANGLE/PATTERN_SQUARE require an even period in ms (see
+        # asi_tiger_galvo_etl_demo.py) -- rounding here matches that script's own logic.
+        galvo_pattern = PATTERN_TRIANGLE if 0.4 <= galvo_duty <= 0.6 else PATTERN_SAWTOOTH
+        if galvo_pattern == PATTERN_TRIANGLE:
+            galvo_period_ms = 2 * round(galvo_period_ms / 2)
+
+        active_galvo.configure(pattern=galvo_pattern, amplitude_v=galvo_amp, offset_v=galvo_off,
+                                period_ms=galvo_period_ms)
+        active_galvo.start()
 
     def start_tasks(self):
         """No-op for this design -- the ETL is armed once per row in
@@ -419,9 +637,10 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
 
     def close_tasks(self):
         """
-        Stops/zeros the ETL (armed once per row in
-        write_waveforms_to_tasks(), see that method's docstring), THEN
-        safes all PLC outputs and zeros the DAC BEFORE disconnecting.
+        Stops/zeros both ETL axes and both galvo axes (whichever was
+        active for the last row, plus the inactive one defensively),
+        THEN safes all PLC outputs and zeros the DAC BEFORE
+        disconnecting.
 
         IMPORTANT (carried over from earlier drafts, still true): the
         PLC keeps running its programmed logic in hardware regardless of
@@ -433,16 +652,21 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         safe_all_outputs() BEFORE zeroing the DAC and disconnecting, so a
         mesoSPIM session ending (normally or via a crash caught by
         whatever wraps this) actually leaves lasers/switch/camera-trigger
-        lines quiet.
+        lines quiet. Note this does NOT stop a free-running galvo by
+        itself (galvo isn't a PLC-driven output) -- that's why both
+        galvo axes get their own explicit stop_and_zero() below, same as
+        the ETL axes.
 
         Does NOT close the shared serial connection if it's owned by the
         ASI stage driver -- only closes it if this instance opened it.
         """
-        if self._etl is not None:
-            try:
-                self._etl.stop_and_zero()
-            except Exception as exc:
-                logger.error(f"ASI Tiger ETL: error stopping/zeroing on close: {exc}")
+        for name, axis in (("ETL L", self._etl_l), ("ETL R", self._etl_r),
+                            ("galvo L", self._galvo_l), ("galvo R", self._galvo_r)):
+            if axis is not None:
+                try:
+                    axis.stop_and_zero()
+                except Exception as exc:
+                    logger.error(f"ASI Tiger {name}: error stopping/zeroing on close: {exc}")
         if self._plc is not None:
             try:
                 self._plc.safe_all_outputs()
@@ -458,7 +682,10 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         self._tiger = None
         self._plc = None
         self._dac = None
-        self._etl = None
+        self._etl_l = None
+        self._etl_r = None
+        self._galvo_l = None
+        self._galvo_r = None
         self._lr_switch = None
         self._camera_trigger_cell = None
         self._camera_expose_bnc = None

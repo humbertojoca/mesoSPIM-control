@@ -3184,6 +3184,272 @@ setup) are the next evidence to check, and the two fixes together
 should be considered as a pair, not independently, since either one
 alone was insufficient.
 
+## Added galvo driving + per-arm ETL (real integration gap found and closed)
+
+**Found while surveying what's actually needed to run this against real
+mesoSPIM-control**: `write_waveforms_to_tasks()` never touched a galvo
+axis at all -- it only set laser intensity, the L/R switch, and
+configured/armed the ETL. A real row would have triggered the camera
+and swept the ETL correctly, but the light-sheet-forming galvo mirror
+would never move -- a static line, not a scanned sheet. This gap dates
+to the per-frame redesign; an earlier, since-superseded draft config
+(`config_asi_tiger_example.py`) still had `galvo_etl_channels` entries
+with real bench-confirmed card/axis mappings, but nothing in the
+CURRENT adapter ever consumed them, and `config_check()` didn't even
+require the key anymore.
+
+**Also found**: the existing ETL code was driving a SINGLE shared axis
+(`ah["etl_card_addr"]`/`ah["etl_axis"]`) regardless of `side`, while
+reading side-specific `self.state` keys (`etl_l_amplitude` vs
+`etl_r_amplitude`). Confirmed directly with the user: the rack has TWO
+physically separate illumination arms, each with its own galvo mirror
+AND its own ETL -- not one pair shared/switched optically. So the
+single-shared-ETL-axis code was a real bug: correct amplitude/offset
+math, wrong physical lens.
+
+**Fixed, both together**: the adapter now holds four separate
+`SingleAxisWaveform` objects (`_etl_l`, `_etl_r`, `_galvo_l`,
+`_galvo_r`), all instantiated and defensively stopped/zeroed in
+`create_tasks()`. `write_waveforms_to_tasks()` (still called once per
+row, refreshed EVERY row per the user's explicit requirement, since
+side/amplitude/offset/frequency can all change row to row):
+- Explicitly `stop_and_zero()`s BOTH the inactive side's ETL and its
+  galvo first -- necessary because rows can alternate sides, and an
+  axis left armed/running for a PREVIOUS row's opposite side would
+  otherwise stay that way into the new row.
+- Configures and arms the ACTIVE side's ETL (unchanged logic, just now
+  addressed to the correct axis).
+- Configures and starts (free-running, SAM=1) the ACTIVE side's galvo,
+  reading `self.state['galvo_{l,r}_amplitude'/'_offset'/'_frequency'/
+  '_duty_cycle']` -- confirmed these are the real mesoSPIM state keys
+  by fetching `mesoSPIM_WaveFormGenerator.py`'s actual source directly
+  (not assumed). `_phase` is read by mesoSPIM's own NI-based software
+  waveform math but has no equivalent here (galvo runs free, on its
+  own internal clock, with nothing to phase against) and is not used.
+  `_duty_cycle` likewise has no exact hardware equivalent -- the card
+  only offers fixed pattern shapes -- approximated as PATTERN_TRIANGLE
+  for duty_cycle in [0.4, 0.6] (matching `asi_tiger_galvo_etl_demo.py`'s
+  own default/rationale: smoother, no flyback discontinuity) and
+  PATTERN_SAWTOOTH otherwise; NOT yet confirmed on real hardware that
+  this is visually/optically fine for every duty_cycle mesoSPIM's GUI
+  allows.
+- Galvo safety: mirrors `asi_tiger_galvo_etl_demo.py`'s own pre-flight
+  check (ASI's own limit -- "Limit command voltage to +/-10.00V to
+  guarantee galvo amplifier safety") -- `amplitude/2 + abs(offset)` is
+  checked against `asi_dac_parameters['galvo_max_volts']` (default
+  10.0V) BEFORE `configure()`/`start()`; if exceeded, logs an error and
+  leaves that row's galvo stopped/zeroed rather than commanding an
+  out-of-range voltage. `SingleAxisWaveform.configure()` has NO
+  built-in safety clamping of its own (checked directly in
+  `singleaxis.py`'s source, unlike `ASITigerDAC`'s `DacChannel`), so
+  this check is the adapter's own responsibility.
+
+`close_tasks()` now stops/zeros all four axes (previously only the one
+shared ETL axis).
+
+`config_check()`'s required keys updated to match: `etl_l_axis`/
+`etl_r_axis` (removed the old single `etl_axis`), `galvo_card_addr`/
+`galvo_l_axis`/`galvo_r_axis` added. Documented assumption (not yet
+independently confirmed): both sides of each pair share ONE card
+(`etl_card_addr`, `galvo_card_addr`) -- true for the historical bench
+mapping (etl_l/etl_r on card 34's H/J, galvo_l/galvo_r on card 37's
+A/C); if a real rack instead has them on different cards, this would
+need a further `_card_addr` split per side.
+
+**`config_asi_tiger_example.py` rewritten from scratch** to match the
+CURRENT `config_check()` shape exactly -- the previous version still
+reflected an even earlier draft (`galvo_etl_channels`, `laser_channels`,
+`plc_camera_trigger_bnc`, `plc_laser_bncs`, `plc_camera_trigger_cell`,
+`software_stream_rate_hz`, none of which the current adapter reads) and
+would have failed `config_check()` immediately if used as-is. All the
+real ASI-confirmed hardware facts from the old file (TGGALVO firmware
+units-per-volt change, K axis's confirmed trigger fault, the production
+H/J pair, the galvo amplifier safety limit) were carried over, just
+reorganized under the current key names. Verified the new example
+satisfies `config_check()`'s exact required-key list by executing it
+and checking every required key is present.
+
+**Verified against a mock** (a synthetic stand-in base class, since the
+real `mesoSPIM_WaveFormGenerator` needs PyQt5/nidaqmx neither available
+nor necessary to test this file's own logic, following the same
+approach used earlier in this project): a Left-side row starts galvo L
+(`SAM A=1`) and arms ETL L (`SAM H=2`), while stopping galvo R/ETL R
+(`SAM C=0`/`SAM J=0`); switching to a Right-side row correctly reverses
+this -- stops galvo L/ETL L, starts galvo R/arms ETL R; an out-of-range
+galvo amplitude (peak > `galvo_max_volts`) is refused with no `SAA`/
+`SAM=1` commands sent at all, logging an error, without crashing;
+`close_tasks()` stops/zeros all four axes and clears all four
+references. Not yet run against real hardware -- unlike the rest of
+this project's per-frame design, this piece hasn't had a bench
+verification pass of its own yet (no galvo+per-arm-ETL-specific test
+script exists; `asi_tiger_galvo_etl_demo.py` confirmed the underlying
+free-running-galvo + triggered-ETL mechanism works, but not through
+this adapter's own row-refresh/side-switch/safety-check logic).
+
+## New: `asi_tiger_galvo_per_arm_bench_test.py` -- bench test for the galvo/per-arm-ETL logic above
+
+Closes the gap noted immediately above: a dedicated bench test for
+`write_waveforms_to_tasks()`'s row-refresh/side-switch/safety-refusal
+logic specifically (not just the underlying free-running-galvo +
+triggered-ETL mechanism, which `asi_tiger_galvo_etl_demo.py` already
+covers for one pair in isolation).
+
+Mirrors the adapter's exact sequence -- two ETL axes, two galvo axes,
+quiesce-then-activate per row -- against a configurable sequence of
+simulated rows (`--rows L,R,L,R` by default). After each row, in
+addition to firing real camera trigger pulses (same manual-cell
+mechanism as `asi_tiger_per_frame_trigger_test.py`) so the ETL sweep
+and galvo scan can be watched on a scope, it does a REAL HARDWARE
+READBACK -- `SAM <axis>?` on all four axes -- and checks that exactly
+the expected axis reads armed/running and the other three read idle,
+rather than just trusting that no exception was raised. `--test-safety-refusal`
+appends one row with a deliberately out-of-range galvo amplitude
+(30Vpp) and confirms via the same readback that it was left un-driven.
+
+**Caveat, found and fixed during mock verification, worth knowing before
+reading real results**: the safety-refusal row is placed on whichever
+side did NOT run in the immediately preceding row, deliberately --
+placing it on the SAME side as the previous row would make a refused
+row correctly leave that axis in whatever state the PREVIOUS
+(successful) row left it, since `write_waveforms_to_tasks()`'s galvo
+safety check only skips THIS row's `configure()`/`start()` on refusal,
+it does not stop an axis that's already legitimately running from
+before. An earlier version of this test script assumed a refused row
+always reads back idle (SAM=0) regardless, which is only true when the
+axis started from idle -- fixed by choosing the refusal row's side to
+guarantee that starting condition. This was caught by the mock, not
+real hardware, so it's a test-script correctness note, not a finding
+about the adapter itself.
+
+`SAM <axis>?` readback support itself is NOT independently confirmed
+against real Tiger firmware anywhere else in this project -- every
+other use of SAM in this codebase only ever WRITES it. The script
+degrades gracefully (prints a note, skips the state check for that
+row, but still fires the frames/watches-on-scope path) if the query
+isn't supported, rather than crashing.
+
+Verified end-to-end against a purpose-built stateful mock (tracks SAM
+mode per card/axis so the readback assertions are meaningful, not just
+canned replies): a 3-row L/R/L sequence plus a safety-refusal row all
+show the expected exactly-one-axis-active pattern and the refusal
+correctly leaves its target axis idle. Not yet run against real
+hardware.
+
+## Bench test run on real hardware confirmed working; ETL period now derived from the real camera exposure time
+
+User ran `asi_tiger_galvo_per_arm_bench_test.py` against real hardware
+(L,R,L,R sequence, 3 frames/row): all 4 rows passed their SAM-readback
+checks, with real Expose-Out cycles completing (~295-340ms each).
+Side-switching (quiescing the inactive arm, arming/starting the active
+one) confirmed working correctly on real hardware, not just the mock.
+
+Separately, the user changed the camera's PVCAM/Photometrics readout
+mode to "All Rows" specifically so Expose-Out would visibly span the
+camera's FULL configured exposure duration. This supersedes an
+earlier, different-conditions finding (Expose-Out ~30ms shorter than
+the exposure setting, under rolling-shutter readout) -- under "All
+Rows", Expose-Out now genuinely matches the configured exposure time.
+Consequence: the ETL's SAM=2 sweep period should now track the real
+camera exposure time (default example: 150ms), not stay pinned to the
+flat 120.0ms guessed value the adapter and bench test both used
+before this readout-mode change.
+
+Fixed by adding `_etl_period_ms(ah)` to
+`mesoSPIM_ASITigerWaveFormGenerator.py`:
+- If `asi_dac_parameters['etl_period_ms']` is explicitly set, it wins
+  unchanged (manual override escape hatch, e.g. for a rack whose
+  Expose-Out timing doesn't track exposure the same way).
+- Otherwise, the period is derived every row from
+  `self.state['camera_exposure_time']*1000 - etl_period_margin_ms`
+  (new optional key, default 3.0ms) -- the same safety margin
+  reasoning as before (the ETL's SAM=2 period must stay SHORTER than
+  the camera's real trigger interval, or the axis misses every other
+  trigger edge), just computed from the real exposure instead of a
+  constant.
+- If the derived period comes out under 2.0ms, it's clamped to 2.0ms
+  with a logged error (1ms is documented as undefined behavior for
+  this firmware) -- this should only trip on a misconfigured
+  `camera_exposure_time` or an unreasonably large margin, not normal
+  use.
+
+Both call sites in `write_waveforms_to_tasks()` (the ETL's own
+`configure()` call, and the galvo's period fallback used only when
+`galvo_freq <= 0`) now go through this helper instead of a flat
+`ah.get("etl_period_ms", 120.0)`.
+
+Mock-verified in isolation (method extracted and exercised against a
+synthetic stand-in, not the full adapter, since only `self.state` and
+the `ah` dict are needed): explicit override returns unchanged;
+150ms exposure with the default 3.0ms margin derives 147.0ms; a
+custom margin is respected; a 3ms exposure (net 0ms after margin)
+correctly clamps to 2.0ms and logs the expected error; a missing
+`camera_exposure_time` key falls back to the documented 0.5s default.
+All five cases passed on the first attempt.
+
+`asi_tiger_galvo_per_arm_bench_test.py` updated to match exactly, so
+it doesn't silently diverge from the adapter's new behavior (the
+user's last real-hardware run used this exact script): added a new
+`resolve_etl_period_ms(args)` function with identical arithmetic,
+`--etl-period-ms` now defaults to `None` (auto-derive) instead of a
+flat 120.0, and a new `--etl-period-margin-ms` flag (default 3.0)
+matches the adapter's new config key. Mock-verified against the same
+three cases (explicit override, 150ms-exposure derivation matching
+the adapter's 147.0ms exactly, and the 2.0ms clamp path) with
+identical results. Also fixed one pre-existing, unrelated pyflakes
+nit in the same file (an f-string with no placeholders) while making
+these edits.
+
+`config_asi_tiger_example.py`'s `etl_period_ms` entry updated to
+reflect that it's now optional/auto-derived by default (commented out,
+with the new `etl_period_margin_ms` key documented in its place).
+Verified the example still executes cleanly and satisfies
+`config_check()` (which never required `etl_period_ms` in the first
+place -- it was always read via `ah.get()`, so no required-key list
+needed updating).
+
+Not yet re-run on real hardware with this change -- the user's
+"changes between axis worked ok" run predates it. Next real-hardware
+pass should confirm the ETL sweep duration now visibly tracks the
+configured exposure time (e.g. ~147ms of actual sweep for a 150ms
+exposure, default margin) rather than the old flat ~120ms.
+
+## Default `etl_period_margin_ms` dropped from 3.0ms to 0.0ms -- margin found negligible under "All Rows"
+
+User, directly, after the change above: "in reality, margin period is
+negligible if the expose out is in 'all rows'". The 2-3ms margin this
+project had used previously was established under the OLD
+rolling-shutter Expose-Out timing, where Expose-Out was itself a
+separate, shorter, derived pulse with its own jitter relative to the
+real exposure window -- margin against THAT made sense. Under "All
+Rows" (the readout mode now in use), Expose-Out spans the exposure
+window directly, so there's no known remaining source of jitter for a
+margin to protect against.
+
+Changed `_etl_period_ms()`'s default `etl_period_margin_ms` from 3.0
+to 0.0 (derived period = the real camera exposure time, exactly -- a
+150ms exposure now derives a 150.0ms ETL period, not 147.0ms). The key
+itself is left in place, not removed, as a manual escape hatch in case
+a different rack or readout mode is later found to still need some
+margin.
+
+Updated in lockstep: `asi_tiger_galvo_per_arm_bench_test.py`'s
+`--etl-period-margin-ms` default (3.0 -> 0.0, help text updated with
+the user's quote); `config_asi_tiger_example.py`'s
+`etl_period_margin_ms` entry (previously set explicitly to 3.0, now
+commented out since 0.0 is already the default, with a note on when to
+uncomment it).
+
+Mock-verified: with the new default, a 0.15s (150ms) exposure derives
+exactly 150.0ms in both the adapter's `_etl_period_ms()` and the bench
+test's matching `resolve_etl_period_ms()` -- confirmed identical.
+Explicit `etl_period_ms` override and explicit non-zero
+`etl_period_margin_ms` are both still respected in both places.
+
+**Confirmed on real hardware by the user** ("running well without
+errors") -- the exposure-derived ETL period (0.0ms margin) runs
+cleanly with the galvo + per-arm ETL bench test, no regressions from
+the margin default change.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level -- the only

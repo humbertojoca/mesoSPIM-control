@@ -8,24 +8,43 @@ mesoSPIM config file -- copy the pieces below into your existing config
 which is exactly how demo_config.py and the other example configs in
 this folder are meant to be used.
 
+REWRITTEN to match the CURRENT adapter's config_check()/create_tasks()
+key shape -- the previous version of this file (galvo_etl_channels,
+laser_channels, plc_camera_trigger_bnc, plc_laser_bncs,
+plc_camera_trigger_cell, software_stream_rate_hz) reflected an EARLIER
+draft of the adapter (pre-per-frame-redesign) and would fail
+config_check() immediately against the current file. See
+PATCHNOTES_ASI_TIGER.md for the full history of why the design changed
+(true per-frame camera triggering instead of the autonomous
+zstack_chain loop; Z/F handled entirely by mesoSPIM's own existing
+per-frame stage-stepping, not this file; two separate galvo/ETL pairs,
+one per illumination arm, confirmed directly by the user -- not one
+pair shared/switched optically).
+
 Card specs, ranges, and safety limits below are taken directly from
 ASI's own confirmation email about this specific rack's build (firmware
-v3.60 SIGNAL_DAC_4CH), not guessed -- see PATCHNOTES_ASI_TIGER.md,
+v3.60 SIGNAL_DAC_4CH plus a later TGGALVO firmware update for the
+galvo card specifically), not guessed -- see PATCHNOTES_ASI_TIGER.md,
 "ASI-confirmed hardware facts" for the full email content. Re-verify
 against your own rack's actual card addresses with the 'N' command
 before trusting these numbers (see tools/asi_tiger_hardware_test.py).
 
 See tools/asi_tiger_hardware_test.py to verify your DAC channels and
-PLC wiring against this same channel layout BEFORE using it here.
+PLC wiring, and tools/asi_tiger_galvo_etl_demo.py to bench-verify the
+galvo/ETL pair for ONE side in isolation, BEFORE trusting this config
+for a real acquisition.
 """
 
 # Select the ASI Tiger backend instead of 'NI', 'cDAQ', or 'DemoWaveFormGeneration'.
 # Requires the mesoSPIM_Core.py edit described in PATCHNOTES_ASI_TIGER.md.
 waveformgeneration = 'ASI_Tiger'
 
-# Read by mesoSPIM_ASITigerWaveFormGenerator.config_check() / create_tasks().
-# Mirrors the shape of 'acquisition_hardware' but for ASI Tiger cards
-# instead of NI channel strings.
+# Read by mesoSPIM_ASITigerWaveFormGenerator.config_check() / create_tasks() /
+# write_waveforms_to_tasks(). See that file's ARCHITECTURE NOTE for the full
+# design rationale -- this is NOT a 1:1 mirror of the NI 'acquisition_hardware'
+# shape, since the hardware split is genuinely different (PLC-driven camera
+# trigger + per-frame Expose-Out polling, hardware-timed single-axis
+# waveforms for galvo/ETL instead of NI analog output tasks).
 asi_dac_parameters = {
     # Serial connection to the Tiger rack. If this matches the ASI stage's
     # COMport in asi_parameters below, the DAC/PLC backend automatically
@@ -35,124 +54,136 @@ asi_dac_parameters = {
     'baudrate': 115200,
 
     # ------------------------------------------------------------------
-    # Galvo + ETL channels, in the order [galvo_l, galvo_r, etl_l, etl_r]
-    # -- must match bundle_galvo_and_etl_waveforms() in
-    # mesoSPIM_WaveFormGenerator.py.
-    #
-    # Card 7 (A/B/C/D): -10.24 to +10.24V, intended for galvo control.
-    #   UPDATED: ASI provided new firmware for this card (bench-confirmed
-    #   working -- 100Hz triangle waveforms on A/C are visibly smooth,
-    #   vs. audible/visible stepping at 50Hz on the original firmware's
-    #   B/D). This new firmware REVERSES which axes are fast: A and C
-    #   now run at 40kHz, B/D at the normal ~1kHz -- the opposite of the
-    #   original SIGNAL_DAC_4CH firmware, where B/D were fastest. Hence
-    #   galvo_l/galvo_r map to A/C below, not B/D.
-    #
-    #   CRITICAL UNITS CHANGE (confirmed by ASI directly): this new
-    #   firmware's control range is -4000..4000 for the SAME +/-10.24V
-    #   the original firmware represents as -10240..10240 (mV). That's
-    #   units_per_volt = 4000/10.24 = ~390.625, NOT 1000 -- using the
-    #   default here would command ~2.56x the intended voltage. Both
-    #   'units_per_volt' below (for plain M/W via ASITigerDAC) AND the
-    #   equivalent constructor arg on SingleAxisWaveform (for SAA/SAO)
-    #   need this value for any axis on this firmware. See
-    #   asi_tiger.dac.UNITS_PER_VOLT_TGGALVO for the exact constant.
-    #
-    #   SAFETY (ASI, verbatim, still applies regardless of firmware/units):
-    #   "Limit command voltage to + and - 10000 (+-10v) to guarantee
-    #   galvo amplifier safety." safety_limit_mv is expressed in REAL
-    #   VOLTAGE (mV) terms and stays correct regardless of
-    #   units_per_volt -- do not remove it.
-    #
-    # Card 4 (H/I/J/K): 0 to 4.096V, 400Hz LPF, intended for Tunable Lens
-    #   control (into an EL-E-4 driver). Still running the ORIGINAL
-    #   SIGNAL_DAC_4CH firmware (units_per_volt defaults to 1000, the
-    #   standard millivolt convention -- no change needed here).
-    #
-    #   ASI's docs say I and K are the guaranteed-fastest axes on this
-    #   card. CONFIRMED ON REAL HARDWARE, K specifically has a trigger
-    #   fault on this card: with SAM=2 triggered externally, K only
-    #   responds to every OTHER pulse (1st/3rd fire, 2nd/4th don't) --
-    #   tested from a fresh controller reset with several seconds
-    #   between manually-sent pulses (ruling out re-arm timing), correct
-    #   jumper installed and verified. H, I, and J were all confirmed
-    #   working correctly under the identical protocol -- this looks
-    #   isolated to K's own trigger circuit on this specific card, not
-    #   the general architecture. Confirmed working axes for this card
-    #   are H, I, and J -- the actual production pair in use is H and J
-    #   (K's own confirmed replacement is J; H is the other channel,
-    #   not I -- corrected after initially defaulting to I in some
-    #   scripts/config here, since I was also confirmed working and
-    #   easy to mix up with H as "the other good axis").
-    #
-    # max_step_v on all four: ASI's own warning -- "Sudden jumps in
-    # command voltage that are faster then the inertial moment of the
-    # device can cause damage" to the galvo/lens. The analog LPFs smooth
-    # normal waveform playback, but a single large jump (a GUI slider
-    # dragged quickly, a bad script) can still exceed what they can
-    # absorb. 0.5V/0.2V are conservative STARTING defaults, not numbers
-    # ASI verified for your specific galvo/lens -- tune down if you have
-    # datasheet numbers for actual safe slew rates, and test cautiously.
-    #
-    'galvo_etl_channels': [
-        {'name': 'galvo_l', 'card_addr': 37, 'axis': 'A', 'range_code': 6,
-         'safety_limit_mv': 10000, 'max_step_v': 0.5,
-         'units_per_volt': 4000 / 10.24},  # new TGGALVO firmware -- see note above
-        {'name': 'galvo_r', 'card_addr': 37, 'axis': 'C', 'range_code': 6,
-         'safety_limit_mv': 10000, 'max_step_v': 0.5,
-         'units_per_volt': 4000 / 10.24},
-        {'name': 'etl_l',   'card_addr': 34, 'axis': 'H', 'range_code': 1,
-         'max_step_v': 0.2},  # original firmware -- default units_per_volt (1000) is correct
-        {'name': 'etl_r',   'card_addr': 34, 'axis': 'J', 'range_code': 1,
-         'max_step_v': 0.2},  # H and J are the confirmed-good production pair -- NOT K (real hardware fault)
-    ],
+    # PLC (Programmable Logic Card): manual camera-trigger cell + camera
+    # Expose-Out readback + ETL sync. See mesoSPIM_ASITigerWaveFormGenerator
+    # .create_tasks() for the exact wiring.
+    'plc_card_addr': 36,
+    'plc_axis': 'E',
+    'camera_expose_bnc': 3,     # PLC BNC wired FROM the camera's Expose-Out
+    'camera_trigger_bnc': 4,    # PLC BNC wired TO the camera's trigger input
+    'camera_trigger_cell': 10,  # optional -- PLC cell used as the manual trigger D-flop (default 10)
+    'camera_trigger_pulse_ms': 10.0,             # optional, default 10.0
+    'camera_expose_start_timeout_s': 2.0,        # optional, default 2.0
+    'camera_expose_end_timeout_margin_s': 2.0,   # optional, default 2.0 (added to state['camera_exposure_time'])
 
     # ------------------------------------------------------------------
-    # Laser modulation channels, in the SAME increasing-wavelength order
-    # as laserdict (same requirement the NI 'laser_task_line' has).
+    # ETL (Tunable Lens control, into an EL-E-4 driver): TWO separate axes,
+    # one per illumination arm -- confirmed directly (not one axis shared/
+    # switched optically). Both on card 4 (H/I/J/K), 0-4.096V, 400Hz LPF,
+    # ORIGINAL SIGNAL_DAC_4CH firmware (units_per_volt defaults to 1000,
+    # the standard millivolt convention -- no override needed).
     #
-    # Card 5 (P/Q/R/S): 0 to 4.096V, 400Hz LPF (adjustable via the
-    #   BACKLASH command if you need a different cutoff), intended for
-    #   analog laser intensity control. By the same "2nd/4th channel is
-    #   fastest" pattern ASI described for cards 4 and 7, Q and S are
-    #   likely the fastest pair here too (not explicitly confirmed by
-    #   ASI for this card -- ask if sub-channel timing matters for your
-    #   blanking scheme). All four are listed since most setups need up
-    #   to 4 laser lines; reorder/swap to match your actual laserdict.
-    'laser_channels': [
+    # CONFIRMED ON REAL HARDWARE: K has a trigger fault on this card --
+    # with SAM=2 triggered externally, K only responds to every OTHER
+    # pulse (tested from a fresh controller reset, several seconds
+    # between manual pulses, ruling out re-arm timing; correct jumper
+    # installed and verified). H, I, and J were all confirmed working
+    # correctly under the identical protocol. The production pair is H
+    # (etl_l) and J (etl_r) -- NOT K, and NOT I (I is also confirmed
+    # working but isn't the axis actually wired/in use).
+    'etl_card_addr': 34,
+    'etl_card_first_axis': 'H',   # first axis letter on this card, for backplane-trigger slot math
+    'etl_l_axis': 'H',
+    'etl_r_axis': 'J',
+
+    # etl_period_ms is now OPTIONAL -- leave it unset (as below) and the
+    # adapter derives it automatically, every row, from the real camera
+    # exposure time: self.state['camera_exposure_time']*1000 -
+    # etl_period_margin_ms. This replaced an earlier flat guessed value
+    # (120.0ms) after the user switched the camera's readout mode to
+    # "All Rows", which made Expose-Out span the FULL configured exposure
+    # duration instead of a shorter rolling-shutter-derived pulse -- so
+    # the ETL sweep should track the real exposure time, not a constant.
+    # See mesoSPIM_ASITigerWaveFormGenerator._etl_period_ms() and
+    # PATCHNOTES_ASI_TIGER.md for the full history.
+    #
+    # 'etl_period_ms': 120.0,     # uncomment to force a fixed period instead (bypasses auto-derivation)
+    #
+    # etl_period_margin_ms defaults to 0.0 (derived period = the real
+    # exposure time, exactly) -- per the user, directly: "in reality,
+    # margin period is negligible if the expose out is in 'all rows'",
+    # since under that readout mode Expose-Out spans the real exposure
+    # window with no known extra jitter to margin against. Left
+    # commented out here since 0.0 is already the default; uncomment
+    # and set a positive value only if your rack/readout mode is found
+    # to still need some margin (the ETL's SAM=2 period must stay
+    # SHORTER than the camera's real trigger interval, or the axis
+    # misses every other trigger edge).
+    # 'etl_period_margin_ms': 0.0,
+
+    # ------------------------------------------------------------------
+    # Galvo (scan mirror): TWO separate axes, one per illumination arm --
+    # same confirmed topology as the ETL above. Card 7 (A/B/C/D),
+    # -10.24 to +10.24V.
+    #
+    # UPDATED FIRMWARE: ASI provided new TGGALVO firmware for this card
+    # (bench-confirmed working -- 100Hz triangle waveforms on A/C are
+    # visibly smooth, vs. audible/visible stepping at 50Hz on the
+    # original firmware's B/D). This new firmware REVERSES which axes
+    # are fast: A and C now run at 40kHz, B/D at the normal ~1kHz -- the
+    # OPPOSITE of the original SIGNAL_DAC_4CH firmware. Hence galvo_l/
+    # galvo_r map to A/C below, not B/D.
+    #
+    # CRITICAL UNITS CHANGE (confirmed by ASI directly): this new
+    # firmware's control range is -4000..4000 for the SAME +/-10.24V the
+    # original firmware represents as -10240..10240 (mV) -- that's
+    # units_per_volt = 4000/10.24 = ~390.625, NOT the library default of
+    # 1000. Using the wrong value here would command ~2.56x the intended
+    # voltage. See asi_tiger.dac.UNITS_PER_VOLT_TGGALVO for the exact
+    # constant (galvo_units_per_volt below uses the same value).
+    'galvo_card_addr': 37,
+    'galvo_l_axis': 'A',
+    'galvo_r_axis': 'C',
+    'galvo_units_per_volt': 4000 / 10.24,  # new TGGALVO firmware -- see note above; pass 1000.0 instead
+                                            # if your card is still on the original SIGNAL_DAC_4CH firmware
+    # SAFETY (ASI, verbatim, still applies regardless of firmware/units):
+    # "Limit command voltage to + and - 10000 (+-10v) to guarantee galvo
+    # amplifier safety." mesoSPIM_ASITigerWaveFormGenerator.write_waveforms_to_tasks()
+    # checks amplitude/2 + abs(offset) against this EVERY row (parameters can
+    # change row to row) and refuses to drive the galvo (leaving it stopped
+    # and zeroed, logging an error) rather than exceed it.
+    'galvo_max_volts': 10.0,
+
+    # ------------------------------------------------------------------
+    # Laser modulation channels, in the SAME order as laserdict's keys
+    # (same requirement the NI 'laser_task_line' has) -- config_check()
+    # validates len(laser_dac_channels) == len(laserdict).
+    #
+    # Card 5 (P/Q/R/S): 0 to 4.096V, 400Hz LPF (adjustable via BACKLASH
+    # if you need a different cutoff), intended for analog laser
+    # intensity control. Only 'name' (matching a DacChannel's own name,
+    # used by write_waveforms_to_tasks() to look up which channel to
+    # drive for the active laser) is required here; the actual channel
+    # is added via ASITigerDAC.add_channel(**ch) in create_tasks(), so
+    # each dict's other keys (card_addr, axis, range_code, ...) must
+    # match DacChannel's constructor.
+    'laser_dac_channels': [
         {'name': 'laser_405', 'card_addr': 35, 'axis': 'P', 'range_code': 1},
         {'name': 'laser_488', 'card_addr': 35, 'axis': 'Q', 'range_code': 1},
         {'name': 'laser_561', 'card_addr': 35, 'axis': 'R', 'range_code': 1},
         {'name': 'laser_638', 'card_addr': 35, 'axis': 'S', 'range_code': 1},
     ],
 
-    # PLC (Programmable Logic Card) address and axis letter.
-    'plc_card_addr': 36,
-    'plc_axis': 'E',
-
-    # Optional: PLC-based 2-laser toggle wiring (see PLCCard.configure_two_laser_toggle
-    # in mesoSPIM/src/devices/asi_tiger/plc.py). Leave as None to skip.
-    'plc_camera_trigger_bnc': 1,      # camera TTL wired into PLC BNC1
-    'plc_laser_bncs': (5, 6),         # PLC BNC5/6 -> laser0/laser1 TTL modulation in
-
-    # Optional: which PLC cell to pulse from run_tasks() to fire the
-    # camera trigger. Leave as None if the camera is triggered some other way.
-    'plc_camera_trigger_cell': None,
-
-    # Effective software-timed streaming rate for the DAC (Hz), used by
-    # WaveformStreamer for anything NOT running through the (not yet
-    # confirmed) on-card single-axis generator. NOT the NI-equivalent
-    # samplerate -- ASI confirmed the digital update ceiling is 4kHz
-    # total across a card's 4 channels (so up to ~1kHz/channel, with the
-    # analog Bessel filters smoothing the resulting steps in hardware),
-    # but the SOFTWARE-timed serial loop here is far below even that --
-    # keep well under ~100 Hz. See PATCHNOTES_ASI_TIGER.md.
-    'software_stream_rate_hz': 50,
+    # ------------------------------------------------------------------
+    # Optional: PLC-based DAC voltage range switch selecting which
+    # illumination arm receives the laser (tested and confirmed working
+    # at 5V high level -- see PATCHNOTES_ASI_TIGER.md). Leave
+    # lr_switch_card_addr unset/None to skip if your rack doesn't have
+    # this switch.
+    'lr_switch_card_addr': 34,
+    'lr_switch_axis': 'I',
+    'lr_switch_left_v': 0.0,
+    'lr_switch_right_v': 5.0,
+    'lr_switch_range_code': 2,   # 0-10.24V range -- see PATCHNOTES_ASI_TIGER.md for why
 }
 
 # If your XYZ stage is ALSO an ASI Tiger stage (stage_parameters['stage_type']
 # containing 'asi'), point it at the same COM port so the connection is
 # shared automatically -- see PATCHNOTES_ASI_TIGER.md, "Connection sharing".
+# ALSO REQUIRED for this design (see mesoSPIM_ASITigerWaveFormGenerator's
+# ARCHITECTURE NOTE): 'ttl_motion_enabled' must be False, since this backend
+# relies entirely on mesoSPIM's own existing per-frame host-stepping loop
+# for Z/F -- it does not touch Z/F itself at all.
 #
 # stage_parameters = {
 #     'stage_type': 'TigerASI',
@@ -161,5 +192,6 @@ asi_dac_parameters = {
 # asi_parameters = {
 #     'COMport': 'COM5',   # <-- same port as asi_dac_parameters['port'] above
 #     'baudrate': 115200,
+#     'ttl_motion_enabled': False,   # REQUIRED -- see note above
 #     ...
 # }
