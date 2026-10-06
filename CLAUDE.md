@@ -1,0 +1,48 @@
+# ASI Tiger backend for mesoSPIM-control: project handoff
+
+Put this file at the root of your mesoSPIM-control fork as `CLAUDE.md`. It is a condensed state of the work so far. `PATCHNOTES_ASI_TIGER.md` has the full dated history.
+
+## What this is
+A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives an ASI Tiger TG-1000 (stage, PLogic and DAC cards) as a replacement for NI hardware in mesoSPIM-control. It is integrated as `mesoSPIM_ASITigerWaveFormGenerator` plus `ASITiger_LaserEnabler`. Base commit of the stock repo: `98d74d35bdc6dbc9523cf9ddbed59f262b629a66`. Core changes live in `mesoSPIM_Core_patch_reference/mesoSPIM_Core.py.diff` (apply with `git apply`).
+
+## Working rules (the user insists on these)
+- Mock-test everything first, then the user confirms on real hardware. Never assume from docs.
+- Keep `PATCHNOTES_ASI_TIGER.md` honest: mark entries as hardware-confirmed, mock-only or superseded.
+- Pass raw numbers from mesoSPIM state to hardware. No amplitude scale factors (removed on request).
+- The user's own config is `config/config_benchtop_ASI_2026.py`. The example is `config/examples/config_asi_tiger_example.py`.
+
+## Design
+- **Per-frame triggering.** Each `run_tasks()` fires one camera trigger through a PLC cell (BNC 4), then polls the camera's Expose-Out (PLC BNC 3) for high and then low. mesoSPIM's own loop steps Z/F, so `ttl_motion_enabled` must be False.
+- **Live mode.** Core calls `begin_live()` and `end_live()` around the live loop. The ETL and galvo keep running between frames and are re-armed only when an `arm_key` of side, ETL amplitude, offset, ramp percentages, period, or galvo amplitude, offset, frequency or duty changes. The laser DAC is held between frames. `live_hold_laser_dac` defaults to True, and the DAC is zeroed at `end_live` or when the laser line changes.
+- **PLC pointer.** Every `CCA F=` write needs a preceding `M E=<cell>` pointer move, about 103 ms each on this rack. Cell states are cached. Pointer tracking (`track_pointer`) is opt-in and live-only.
+- **Laser blanking.** PLC enable lines (cells 12–15, BNCs 5–8).
+- **ETL.** SAM=2 re-arms on every rising edge of Expose-Out (hardware-confirmed). mesoSPIM's ETL amplitude is half peak-to-peak, while Tiger SAA is total peak-to-peak. The ETL driver (Optotune EL-E-4i) is the real voltage limit. The DAC range of 0–4.096 V is fine, and the min/max guard is opt-in (`etl_min_volts`, `etl_max_volts`). A negative SAA reverses the ramp direction, but that geometry is not bench-confirmed.
+- **Shared serial port.** The stage driver and this backend share one serial connection. A `serial_lock` in `asicontrol.py` serializes them.
+- **Stage position during live and acquisition.** Slow polling through the Core patch (`stage_poll_interval_ms_during_run`, default 1000 ms), ASI_Tiger only.
+
+## Hardware-confirmed
+- live() works at about 2 fps. The galvo runs continuously. Laser blanking, laser line and intensity changes during live, and left/right switching all work.
+- **Camera Expose-Out mode must be Any Row (`exp_out_mode: 2`).** Log e977f8da: Expose-Out rises about 8 ms after the trigger and is high for about 380–418 ms at a 200 ms exposure (exposure plus a rolling-shutter sweep of about 190 ms). With All Rows (mode 1) the pulse is only about 20 ms wide, near the end of the exposure, so the ETL starts late and laser blanking ends early. The user's earlier "short pulse" report was a mis-set config, not a camera or mesoSPIM bug. The camera applies the mode exactly as set, and stock mesoSPIM never overrides it.
+- Frame time at 200 ms exposure is about 0.66 s with Any Row. This is mostly physical, not overhead.
+
+## Mock-only, still waiting for hardware confirmation
+- Slow stage-position polling during live (Core patch needs re-applying).
+- ETL raw amplitude, ramp direction and limits, and the `PR` range query logging.
+- Whether the ETL ramp period (200 ms) matches the roughly 190 ms sweep in the actual images.
+
+## Open items and possible next steps
+- The user is aligning lasers and setting galvo and ETL offsets and amplitudes now.
+- Acquisition-rows testing is the next big area ("the next thing I'd look at is acquisition rows").
+- Set `frame_timing_log` to False once troubleshooting is done.
+- Possible further per-frame trimming: the remaining laser DAC set and zero, and two pointer moves.
+- Stale docstrings in `mesoSPIM_ASITigerWaveFormGenerator.py` (for example `_etl_period_ms`) still describe Expose-Out under All Rows. Update them to Any Row.
+
+## Tools (`tools/`)
+- `asi_tiger_camera_expose_out_probe.py`: pyvcam-only probe of Expose-Out and scan modes. The Internal Trigger run stops quickly, so it is not representative of mesoSPIM's Edge Trigger path.
+- `asi_tiger_singleaxis_test.py` and the other bench scripts: see their docstrings.
+
+## Known pitfalls (already fixed, do not reintroduce)
+- A serial write hang. The fix is a finite write timeout and a 5 ms poll interval.
+- Wiring severed by a PLC reset. Wiring persists now.
+- The left/right switch DAC channel being zeroed. Only laser channels are zeroed.
+- Pausing stage polling for non-ASI backends. Only ASI_Tiger pauses now.
