@@ -1,386 +1,237 @@
 Timeout (0:00:15)!
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\properties.py", line 417 in setProperties
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 230 in setupObject
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 264 in createWidget
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 546 in handleItem
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 503 in createLayout
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 273 in createWidget
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 546 in handleItem
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 503 in createLayout
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 273 in createWidget
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 273 in createWidget
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 546 in handleItem
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 503 in createLayout
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 273 in createWidget
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 806 in traverseWidgetTree
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 828 in createUserInterface
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\uiparser.py", line 1037 in parse
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\Loader\loader.py", line 66 in loadUi
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\PyQt5\uic\__init__.py", line 241 in loadUi
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_MainWindow.py", line 99 in __init__
+Thread 0x000078c0 (most recent call first):
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Camera.py", line 532 in open_camera
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Camera.py", line 90 in __init__
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 128 in __init__
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_MainWindow.py", line 155 in __init__
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 165 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
 Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 355 in reset_input_buffer
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 203 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 440 in read_bnc_inputs
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 801 in _poll_expose_bit
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 824 in run_tasks
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
+Thread 0x000078c0 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
 Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 355 in reset_input_buffer
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 203 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 440 in read_bnc_inputs
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 801 in _poll_expose_bit
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 824 in run_tasks
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
+Thread 0x000078c0 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
 Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
+Thread 0x000078c0 (most recent call first):
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
+Timeout (0:00:15)!
+Thread 0x00004aec (most recent call first):
   File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 440 in read_bnc_inputs
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 801 in _poll_expose_bit
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 824 in run_tasks
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 445 in read_bnc_inputs
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 803 in _poll_expose_bit
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 826 in run_tasks
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
 
-Thread 0x000041bc (most recent call first):
+Thread 0x000078c0 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
 Timeout (0:00:15)!
-Thread 0x00008560 (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\plugins\utils.py", line 21 in count_domain_to_uint16
+Thread 0x00007e40 (most recent call first):
+  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\numpy\lib\_type_check_impl.py", line 468 in nan_to_num
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\plugins\utils.py", line 19 in count_domain_to_uint16
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\plugins\ImageProcessors\IdentityProcessor.py", line 40 in process_frame
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ProcessorChain.py", line 247 in process
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Camera.py", line 251 in get_live_image
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
 
-Thread 0x0000569c (most recent call first):
+Thread 0x00004aec (most recent call first):
   File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 184 in _select
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 779 in set_cell_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 791 in run_tasks
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\dac.py", line 461 in set_voltage
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 150 in select_left
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 165 in select
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 634 in write_waveforms_to_tasks
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 735 in snap_image
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
+
+Thread 0x000078c0 (most recent call first):
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
+Timeout (0:00:15)!
+Thread 0x00004aec (most recent call first):
+  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 445 in read_bnc_inputs
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 803 in _poll_expose_bit
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 826 in run_tasks
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
 
-Thread 0x000041bc (most recent call first):
+Thread 0x000078c0 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
 Timeout (0:00:15)!
-Thread 0x00008560 (most recent call first):
+Thread 0x00007e40 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\plugins\utils.py", line 20 in count_domain_to_uint16
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\plugins\ImageProcessors\IdentityProcessor.py", line 40 in process_frame
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ProcessorChain.py", line 247 in process
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Camera.py", line 251 in get_live_image
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
 
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\singleaxis.py", line 331 in stop_and_zero
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 660 in write_waveforms_to_tasks
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 735 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
+Thread 0x00004aec (most recent call first):
   File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 184 in _select
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 779 in set_cell_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 87 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\lasers\ASITiger_LaserEnabler.py", line 138 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 742 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 184 in _select
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 779 in set_cell_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 87 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\lasers\ASITiger_LaserEnabler.py", line 138 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 742 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 440 in read_bnc_inputs
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 801 in _poll_expose_bit
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 824 in run_tasks
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 189 in _select
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 784 in set_cell_state
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 793 in run_tasks
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
 
-Thread 0x000041bc (most recent call first):
+Thread 0x000078c0 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
 Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
+Thread 0x00007e40 (most recent call first):
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\plugins\utils.py", line 21 in count_domain_to_uint16
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\plugins\ImageProcessors\IdentityProcessor.py", line 40 in process_frame
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ProcessorChain.py", line 247 in process
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Camera.py", line 251 in get_live_image
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
+
+Thread 0x00004aec (most recent call first):
   File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 184 in _select
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 779 in set_cell_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 87 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\lasers\ASITiger_LaserEnabler.py", line 138 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 742 in snap_image
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 189 in _select
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 784 in set_cell_state
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 793 in run_tasks
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
 
-Thread 0x000041bc (most recent call first):
+Thread 0x000078c0 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
 Timeout (0:00:15)!
-Thread 0x00008560 (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\numpy\lib\_function_base_impl.py", line 978 in copy
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\pyvcam\camera.py", line 672 in poll_frame
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Camera.py", line 673 in get_live_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Camera.py", line 246 in get_live_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-
-Thread 0x0000569c (most recent call first):
+Thread 0x00004aec (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 271 in _flush_bounded
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 205 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\dac.py", line 461 in set_voltage
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 150 in select_left
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 165 in select
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 633 in write_waveforms_to_tasks
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 735 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x00008560 (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 184 in _select
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 779 in set_cell_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 791 in run_tasks
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 445 in read_bnc_inputs
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 803 in _poll_expose_bit
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 826 in run_tasks
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
 
-Thread 0x000041bc (most recent call first):
+Thread 0x000078c0 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
 Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 184 in _select
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 779 in set_cell_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 87 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\lasers\ASITiger_LaserEnabler.py", line 138 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 742 in snap_image
+Thread 0x00007e40 (most recent call first):
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\plugins\utils.py", line 20 in count_domain_to_uint16
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\plugins\ImageProcessors\IdentityProcessor.py", line 40 in process_frame
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ProcessorChain.py", line 247 in process
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Camera.py", line 251 in get_live_image
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
 
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
+Thread 0x00004aec (most recent call first):
   File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 184 in _select
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 779 in set_cell_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 87 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\lasers\ASITiger_LaserEnabler.py", line 138 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 742 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 780 in set_cell_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 87 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\lasers\ASITiger_LaserEnabler.py", line 138 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 742 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 440 in read_bnc_inputs
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 801 in _poll_expose_bit
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 824 in run_tasks
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 189 in _select
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 784 in set_cell_state
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 793 in run_tasks
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
 
-Thread 0x000041bc (most recent call first):
+Thread 0x000078c0 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
 Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
+Thread 0x00004aec (most recent call first):
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 834 in run_tasks
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
+
+Thread 0x000078c0 (most recent call first):
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
+Timeout (0:00:15)!
+Thread 0x000078c0 (most recent call first):
+  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\stages\asi\asicontrol.py", line 89 in _send_command
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\stages\asi\asicontrol.py", line 154 in read_position
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Stages.py", line 1936 in report_position
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
+Timeout (0:00:15)!
+Thread 0x00004aec (most recent call first):
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\filter_wheels\mesoSPIM_FilterWheel.py", line 55 in set_filter
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Serial.py", line 263 in set_filter
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 465 in set_filter
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 1098 in prepare_acquisition
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 946 in run_acquisition_list
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 876 in start
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 386 in set_state
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
+
+Thread 0x000078c0 (most recent call first):
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
+Timeout (0:00:15)!
+Thread 0x00004aec (most recent call first):
   File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 288 in read
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 288 in _read_reply_lenient
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 206 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 184 in _select
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 779 in set_cell_state
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 189 in _select
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 784 in set_cell_state
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\row_setup.py", line 87 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\lasers\ASITiger_LaserEnabler.py", line 138 in disable_all
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 742 in snap_image
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\lasers\ASITiger_LaserEnabler.py", line 144 in disable_all
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 764 in snap_image_in_series
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 1159 in run_acquisition
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 947 in run_acquisition_list
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 876 in start
+  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 386 in set_state
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
 
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 832 in run_tasks
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x0000569c (most recent call first):
-  File "C:\Users\Public\mamba\envs\mesoSPIM-py312\Lib\site-packages\serial\serialwin32.py", line 355 in reset_input_buffer
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\controller.py", line 203 in send_command
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\devices\asi_tiger\plc.py", line 440 in read_bnc_inputs
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 801 in _poll_expose_bit
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_ASITigerWaveFormGenerator.py", line 824 in run_tasks
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 740 in snap_image
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\utils\utility_functions.py", line 137 in wrapper
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 811 in live
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 371 in set_state
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\src\mesoSPIM_Core.py", line 308 in state_request_handler
-
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x000041bc (most recent call first):
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
-  File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
-Timeout (0:00:15)!
-Thread 0x000041bc (most recent call first):
+Thread 0x000078c0 (most recent call first):
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 178 in main
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 183 in run
   File "C:\Users\Public\mesoSPIM-control\mesoSPIM\mesoSPIM_Control.py", line 187 in <module>
