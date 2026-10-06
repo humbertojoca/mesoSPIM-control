@@ -154,7 +154,7 @@ un-triggered, on its own internal clock -- there's nothing to phase
 against). '_duty_cycle' has no exact hardware equivalent either: the
 card offers fixed PATTERN_TRIANGLE/PATTERN_SAWTOOTH/etc. shapes, not a
 continuously-variable duty cycle. Approximated as PATTERN_TRIANGLE for
-duty_cycle in [0.4, 0.6] (a symmetric back-and-forth scan, matching
+duty_cycle in 40-60 % (mesoSPIM stores percent; a symmetric back-and-forth scan, matching
 asi_tiger_galvo_etl_demo.py's own default and rationale -- smoother, no
 flyback discontinuity) and PATTERN_SAWTOOTH otherwise. NOT yet
 confirmed on real hardware that this approximation is visually/
@@ -863,13 +863,22 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         galvo_period_ms = 1000.0 / galvo_freq if galvo_freq > 0 else self._etl_period_ms(ah, letter)
         # PATTERN_TRIANGLE/PATTERN_SQUARE require an even period in ms (see
         # asi_tiger_galvo_etl_demo.py) -- rounding here matches that script's own logic.
-        galvo_pattern = PATTERN_TRIANGLE if 0.4 <= galvo_duty <= 0.6 else PATTERN_SAWTOOTH
+        # mesoSPIM's galvo duty cycle is in PERCENT (state/config 'galvo_*_duty_cycle': 50;
+        # utils/waveforms.sawtooth(dutycycle=50) is a symmetric triangle). BUG FIXED 2026-10-06:
+        # this compared it as a fraction (0.4..0.6), so 50 never matched and the galvo ran as a
+        # SAWTOOTH with a hard flyback every period (hardware log: '37SAP A=0'). A value <= 1 is
+        # still accepted as a fraction.
+        duty_pct = galvo_duty * 100.0 if galvo_duty <= 1.0 else galvo_duty
+        galvo_pattern = PATTERN_TRIANGLE if 40.0 <= duty_pct <= 60.0 else PATTERN_SAWTOOTH
         if galvo_pattern == PATTERN_TRIANGLE:
             galvo_period_ms = 2 * round(galvo_period_ms / 2)
 
         active_galvo.configure(pattern=galvo_pattern, amplitude_v=galvo_amp, offset_v=galvo_off,
                                 period_ms=galvo_period_ms)
         active_galvo.start()
+        logger.info(f"ASI Tiger galvo ({side}): {'triangle' if galvo_pattern == PATTERN_TRIANGLE else 'sawtooth'} "
+                    f"(duty {galvo_duty} -> {duty_pct:.0f} %), period {galvo_period_ms:.0f} ms, "
+                    f"amplitude {galvo_amp:.3f} Vpp, offset {galvo_off:.3f} V, free-running")
         if self._live_mode:
             self._armed_key = arm_key
 

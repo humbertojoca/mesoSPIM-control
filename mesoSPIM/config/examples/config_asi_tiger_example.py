@@ -86,7 +86,9 @@ asi_dac_parameters = {
     # Amplitudes are passed RAW from mesoSPIM's state (tune per system). Note the Tiger's SAA is TOTAL
     # peak-to-peak, whereas NI-era mesoSPIM swung offset +/- amplitude -- the same number is a half-size sweep here.
     'etl_follow_ramp_direction': False,          # optional, default False: True = a side whose ramp_falling_% > ramp_rising_%
-                                                 # (normally Right) gets a NEGATIVE SAA (downward ramp). Bench-check first
+                                                 # (normally Right) gets a NEGATIVE SAA (downward ramp). Needed for two-arm
+                                                 # ASLM (both arms share one rolling direction but propagate opposite ways);
+                                                 # hardware-confirmed on the benchtop rack 2026-10-06
     # ETL guard (opt-in; a swing outside these is refused, ETL left stopped and zeroed). 0-4.096 V is this rack's
     # DAC range for the ETL axes (user-confirmed). The real ceiling is the Optotune lens driver: its analog input is
     # specified 0-5 V, 10-bit, mapped LINEARLY onto the current range set by the driver's lower/upper software limits

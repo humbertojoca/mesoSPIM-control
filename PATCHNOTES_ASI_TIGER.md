@@ -4711,6 +4711,22 @@ User-confirmed: the row's Z step was 10 um (matches exactly), and theta and F di
 - **CORRECTION (2026-10-06, after the user's observation):** an earlier note here called 200 ms "effectively non-ASLM". Wrong. At 200 ms each row integrates ~200 ms, about the whole ETL sweep, so the waist passes every row once: a time-averaged swept-focus sheet. Points ARE in focus across the FOV (user sees this), but each row also integrates the out-of-focus part of the sweep (broader tails, more background). At 20 ms each row integrates only while the waist is near it, so the rolling slit also rejects the out-of-focus light: thinner effective sheet, better contrast, and ~1.7x faster. Both are valid; `etl_period_source` lets the user choose ('exposure' with its tuned offset suits 200 ms). A structured sample should decide.
 - Not yet: Right arm with 'sweeptime' (227 ms from 85 %), acquisition at 20 ms, image quality on a structured sample.
 
+## 2026-10-06 (v0.8): BUG -- galvo ran as a SAWTOOTH, not a triangle (duty-cycle units; HARDWARE-CONFIRMED)
+
+mesoSPIM stores `galvo_*_duty_cycle` in **percent** (config/state 50; `utils/waveforms.sawtooth(dutycycle=50)` is a symmetric triangle). `write_waveforms_to_tasks()` compared it as a fraction (`0.4 <= duty <= 0.6`), so 50 never matched and every galvo was configured `PATTERN_SAWTOOTH`: a ramp with a hard flyback each period instead of the intended back-and-forth scan. **Hardware evidence:** log 20261006-173720 shows `'37SAP A=0'` (pattern 0 = sawtooth). Present since the galvo was added; it affected every live / acquisition frame on both arms.
+
+**Fix:** the duty is read as percent (a value <= 1 is still accepted as a fraction); 40-60 % -> `PATTERN_TRIANGLE` (period rounded to an even ms, as before), else sawtooth. A new INFO line per (re)arm: `ASI Tiger galvo (<side>): triangle (duty 50 -> 50 %), period 10 ms, amplitude ..., offset ..., free-running`.
+
+**Mock (`mock_galvo.py`):** duty 50 -> `37SAP A=1` / `C=1` (triangle), `SAF 10`; 0.5 -> triangle; 30 and 100 -> sawtooth; 150 Hz triangle -> 6 ms (even). Earlier suites pass.
+
+**Hardware checks:** the new galvo log line says triangle; galvo output (card 37 A/C) on a scope is a symmetric triangle at 100 Hz; sheet illumination in the solution is at least as even as before (a triangle has no flyback, but each point is now crossed twice per period instead of once).
+
+**HARDWARE-CONFIRMED (log 20261006-190703):** `ASI Tiger galvo (Right): triangle (duty 50 -> 50 %), period 10 ms`; user: sheet fine in the fluorescent solution, only parameter fine-tuning. (No scope trace taken.)
+
+## 2026-10-06 (v0.8): Right-arm ETL ramp direction (`etl_follow_ramp_direction: True`) HARDWARE-CONFIRMED
+
+The option existed (mock-only, "reversed-ramp geometry not bench-confirmed") and was off, so BOTH arms ramped up. Both arms share one rolling direction but propagate opposite ways, so the Right ETL must ramp the opposite way. With the option on, a side whose ramp falling % > rising % (Right 5 / 85-90) gets a negative SAA (down ramp, same voltage window, offset unchanged). Mock (`mock_direction.py`): Left `SAA H=480`, Right `SAA J=-500`, live Left -> Right re-arms with the right sign. **Hardware (log 20261006-190703, Right, 20 ms ASLM, fluorescent solution):** `down ramp`, 2.586..3.086 V, 243 ms; user: the waist follows the slit, everything fine after fine-tuning. On in the user's config.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level. The only
