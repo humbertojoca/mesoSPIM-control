@@ -4688,6 +4688,28 @@ Display skipping frames during acquisition (user report) is stock mesoSPIM: meso
 
 User-confirmed: the row's Z step was 10 um (matches exactly), and theta and F did not move. Not checked: images (no sample available; Z motion itself is confirmed), a second step size, multi-row.
 
+## 2026-10-06 (v0.8): ETL period from the rolling sweep (`etl_period_source: 'sweeptime'`, HARDWARE-CONFIRMED timing; see the end of this entry)
+
+**Finding (camera config analysis):** the Iris 15 runs Line Delay scan mode, line time = 10.26 us x (scan_line_delay + 1) = 71.82 us at delay 6, so the rolling sweep over 2960 rows is ~213 ms. At the user's 200 ms exposure ~2780 of 2960 rows expose at once -- effectively no ASLM slit. The stock mesoSPIM benchtop configs for the same camera and line delay use a 20 ms exposure (a ~280-row slit) with `sweeptime` 0.267 s and ETL ramp 5 / 90 / 5 %. The backend's ETL period has been = exposure, which only matched the sweep by coincidence at 200 ms; at 20 ms it would ramp in 20 ms.
+
+**Change:** optional `asi_dac_parameters['etl_period_source']`: `'exposure'` (default, unchanged) or `'sweeptime'` = `state['sweeptime']` x max(`etl_<side>_ramp_rising_%`, `_falling_%`) / 100 -- mesoSPIM's own GUI-editable NI ETL timing, passed through raw. max() because the Right arm's 5 / 85 settings sweep on the falling part (direction stays `etl_follow_ramp_direction`'s job). `etl_period_ms` still overrides both. The period is part of the live arm key, so editing sweeptime or ramp % in live re-arms. The SAM=2 ramp starts on Expose-Out's rise (first row) while the slit centre lags by exposure/2; on a linear ramp that lag equals an offset shift, so it is tuned with the ETL offset as usual (no PLC delay cell).
+
+**Diagnostics:** the arm log line now says `period N ms (from <source>)` and `predicted Expose-Out window W ms` (= exposure + rows x line time; `camera_line_time_base_us` default 10.26, rows / binning). WARNINGs: period < 0.5 x sweep (focus cannot follow the slit -> use 'sweeptime'), or period > window + 30 ms (SAM=2 might miss the next trigger).
+
+**Mock (`mock_period.py`):** 'exposure' 200 ms -> SAF 200, predicted window 413 ms; 'sweeptime' Left 267.34 x 90 % -> 241 ms, Right x 85 % -> 227 ms; 20 ms exposure with 'exposure' -> 20 ms + warning; with 'sweeptime' -> 241 ms, no warning; sweeptime 0.5 s -> long-ramp warning; explicit etl_period_ms wins; live sweeptime change re-arms (241 -> 180). Earlier suites pass.
+
+**Expected:** 20 ms exposure + 'sweeptime': Expose-Out ~20 + ~213 ms, frame ~0.28 s (was 0.44 s), and a real ASLM slit. Note the measured Any Row width at 200 ms was ~390-400 ms vs 413 predicted; the line-time base is from the config comment, so compare the log's prediction with the measured width.
+
+**User config for testing:** `etl_period_source: 'sweeptime'`. Revert: `'exposure'`.
+
+**Hardware checks:** live at 200 ms: arm log shows ~241 ms (L) / ~227 ms (R) and the predicted window; then set the exposure to 20 ms in the GUI: Expose-Out "high for" ~230 ms, frame ~0.28 s, ETL ramp on a scope spans the window; image quality needs a sample (slit focus via ETL offset / amplitude).
+
+**HARDWARE-CONFIRMED (log 20261006-173720, Left arm, fluorescent solution in the chamber):**
+- 200 ms exposure: `period 241 ms (from sweeptime)`, predicted window 413 ms, measured "high for" ~387-399 ms, 0.44 s per frame, 1.94 fps. User: the sweeptime-timed ETL was "very off" at 200 ms -- expected, ~2780 of 2960 rows expose at once, so no single ETL focus fits (200 ms is effectively non-ASLM).
+- 20 ms exposure (stock ASLM): predicted window 233 ms, measured ~208-219 ms, **0.25-0.26 s per frame, live 3.71 fps** (was 0.44 s / ~2.1 fps). User: "20 ms was better"; the waist, light sheet and ETL focus sweep are visible in the solution.
+- Measured sweep ~195-200 ms (window - exposure + poll lag), so the prediction (10.26 us x 7 x 2960 = 213 ms) is ~7% high; ~9.5 us base would fit (inferred from poll-resolution data, only affects the log line). Consequence: the 241 ms ramp (sweeptime 0.267 x 90 %) is ~20 % longer than the sweep -- tune sweeptime to ~0.22 s (90 % -> ~198 ms) and fine-tune by eye so the waist stays in the slit across the frame; centre with the ETL offset.
+- Not yet: Right arm with 'sweeptime' (227 ms from 85 %), acquisition at 20 ms, image quality on a structured sample.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level. The only

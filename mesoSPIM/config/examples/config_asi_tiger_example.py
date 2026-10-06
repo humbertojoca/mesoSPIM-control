@@ -120,6 +120,13 @@ asi_dac_parameters = {
                                                  # pointer moves (~0.2 s) per frame. No new wiring.
     'plc_laser_gate_cells': (8, 9, 11, 16),      # optional, the and2 cells used for that gate (one per laser; must not
                                                  # use the trigger cell 10, the enable cells 12-15, or 1-7 kept for zstack_chain)
+    'etl_period_source': 'exposure',                  # optional, default 'exposure' (mock-tested; 'sweeptime' NOT yet hardware-confirmed):
+                                                 # 'exposure' = ETL ramp period = camera exposure (legacy; matches the rolling
+                                                 # sweep only by coincidence at ~200 ms exposure). 'sweeptime' = mesoSPIM's own
+                                                 # sweeptime x max(etl ramp rising %, falling %) of the side -- follows the
+                                                 # SWEEP (rows x line time), needed for ASLM exposures like 20 ms. The arm log
+                                                 # line prints the predicted Expose-Out window (exposure + rows x line time).
+    'camera_line_time_base_us': 10.26,           # optional, Iris 15 line time per (scan_line_delay + 1); only used for that log
     'expose_width_warn_fraction': 0.5,           # optional, default 0.5: warn once per live session if Expose-Out is high for
                                                  # less than this fraction of the exposure (Any Row should be ~ exposure + sweep).
                                                  # 0 silences it. Only checked for exposures >= expose_width_check_min_exposure_s (0.1)

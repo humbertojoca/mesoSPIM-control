@@ -558,7 +558,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         logger.warning(f"ASI Tiger: could not read Z for the TTL log ({exc})")
         return None
 
-    def _etl_period_ms(self, ah) -> float:
+    def _etl_period_ms(self, ah, letter: str = "l") -> float:
         """
         The ETL's SAM=2 waveform period, in ms.
 
@@ -592,10 +592,34 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         this derivation entirely (manual escape hatch, e.g. for a fixed
         value independent of exposure time) -- the default (unset) is to
         auto-derive as described above.
+
+        asi_dac_parameters['etl_period_source'] = 'sweeptime' (opt-in, default
+        'exposure' = the behaviour above): period = state['sweeptime'] x the
+        side's sweep share, max(etl_<side>_ramp_rising_%, _falling_%) / 100 --
+        mesoSPIM's own NI ETL timing numbers, passed through raw. This is what
+        ASLM needs: the ETL must follow the rolling SWEEP (rows x line time,
+        ~190-210 ms on the user's rack at scan_line_delay 6), which is independent
+        of the exposure (the slit width). 'exposure' only matched the sweep by
+        coincidence at a 200 ms exposure; at a stock ASLM 20 ms exposure it would
+        ramp in 20 ms. max(rising, falling) because the Right arm's usual settings
+        (rise 5 / fall 85) sweep on the FALLING part; the direction itself is
+        etl_follow_ramp_direction's job. A constant start lag (SAM=2 starts on
+        Expose-Out's rise, i.e. the first row, while the slit centre lags by
+        exposure/2) is equivalent to an ETL offset shift on a linear ramp, so it is
+        tuned away with the offset as usual.
         """
         explicit = ah.get("etl_period_ms")
         if explicit is not None:
             return explicit
+        if ah.get("etl_period_source", "exposure") == "sweeptime":
+            sweeptime_s = _state_get(self.state, "sweeptime", None)
+            rise = _state_get(self.state, f"etl_{letter}_ramp_rising_%", None)
+            fall = _state_get(self.state, f"etl_{letter}_ramp_falling_%", None)
+            if sweeptime_s is not None and rise is not None and fall is not None:
+                period_ms = float(sweeptime_s) * 1000.0 * max(float(rise), float(fall)) / 100.0
+                return max(period_ms, 2.0)
+            logger.error("ASI Tiger ETL: etl_period_source='sweeptime' but sweeptime / ramp % are not "
+                         "in state -- falling back to the exposure-derived period.")
         margin_ms = ah.get("etl_period_margin_ms", 0.0)
         exposure_s = _state_get(self.state, "camera_exposure_time", 0.5)
         period_ms = exposure_s * 1000.0 - margin_ms
@@ -608,6 +632,24 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             )
             period_ms = 2.0
         return period_ms
+
+    def _predicted_expose_window_ms(self):
+        """Any Row Expose-Out window predicted from the camera config: exposure +
+        rows x line time, with line time = camera_line_time_base_us (default 10.26,
+        Iris 15) x (scan_line_delay + 1) in Line Delay scan mode. None if the config
+        does not say (other scan modes / cameras). Logged next to the ETL period."""
+        cp = getattr(self.cfg, "camera_parameters", {}) or {}
+        if cp.get("scan_mode") != 1 or cp.get("y_pixels") is None:
+            return None
+        base_us = float(self.cfg.asi_dac_parameters.get("camera_line_time_base_us", 10.26))
+        line_us = base_us * (int(cp.get("scan_line_delay", 0)) + 1)
+        binning = _state_get(self.state, "camera_binning", "1x1")
+        try:
+            rows = int(cp["y_pixels"]) // int(str(binning).split("x")[-1])
+        except (ValueError, TypeError):
+            rows = int(cp["y_pixels"])
+        exposure_ms = _state_get(self.state, "camera_exposure_time", 0.0) * 1000.0
+        return exposure_ms + rows * line_us / 1000.0
 
     def write_waveforms_to_tasks(self):
         """
@@ -719,7 +761,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             _state_get(self.state, f"etl_{letter}_offset", 0.0),
             _state_get(self.state, f"etl_{letter}_ramp_rising_%", None),
             _state_get(self.state, f"etl_{letter}_ramp_falling_%", None),
-            self._etl_period_ms(ah),
+            self._etl_period_ms(ah, letter),
             _state_get(self.state, galvo_amp_key, 0.0),
             _state_get(self.state, f"galvo_{letter}_offset", 0.0),
             _state_get(self.state, f"galvo_{letter}_frequency", 100.0),
@@ -740,7 +782,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         active_etl = etl_by_letter[letter]
         etl_amp = _state_get(self.state, f"etl_{letter}_amplitude", 0.0)
         etl_off = _state_get(self.state, f"etl_{letter}_offset", 0.0)
-        etl_period_ms = self._etl_period_ms(ah)
+        etl_period_ms = self._etl_period_ms(ah, letter)
         # Amplitude is passed through RAW (the user's decision: each system gets its
         # numbers tuned anyway). Note for tuning: the Tiger's SAA is the TOTAL
         # peak-to-peak amplitude (ASI command:saa), whereas mesoSPIM's NI ETL ramp
@@ -778,9 +820,26 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             active_etl.configure(pattern=PATTERN_SAWTOOTH, amplitude_v=amp_hw, offset_v=etl_off,
                                   period_ms=etl_period_ms, external_trigger=True)
             active_etl.arm_triggered(free_running=False)
+            window_ms = self._predicted_expose_window_ms()
+            src = "etl_period_ms" if ah.get("etl_period_ms") is not None else ah.get("etl_period_source", "exposure")
             logger.info(f"ASI Tiger ETL ({side}): offset {etl_off:.3f} V, amplitude {abs(amp_hw):.3f} Vpp "
                         f"(raw from state) -> sweep {etl_lo:.3f}..{etl_hi:.3f} V, {direction} ramp, "
-                        f"period {etl_period_ms:.0f} ms, armed on external trigger")
+                        f"period {etl_period_ms:.0f} ms (from {src}), armed on external trigger"
+                        + (f"; predicted Expose-Out window {window_ms:.0f} ms" if window_ms else ""))
+            if window_ms:
+                exposure_ms = _state_get(self.state, "camera_exposure_time", 0.0) * 1000.0
+                sweep_ms = window_ms - exposure_ms
+                if etl_period_ms < 0.5 * sweep_ms:
+                    logger.warning(
+                        f"ASI Tiger ETL ({side}): ramp period {etl_period_ms:.0f} ms is much shorter than the "
+                        f"camera's rolling sweep (~{sweep_ms:.0f} ms = rows x line time), so the focus will not "
+                        f"follow the slit. For ASLM set asi_dac_parameters['etl_period_source'] = 'sweeptime' "
+                        f"and tune sweeptime / ramp % in the GUI.")
+                elif etl_period_ms > window_ms + 30.0:
+                    logger.warning(
+                        f"ASI Tiger ETL ({side}): ramp period {etl_period_ms:.0f} ms is longer than the predicted "
+                        f"Expose-Out window ({window_ms:.0f} ms) + 30 ms; SAM=2 must finish before the next "
+                        f"frame's Expose-Out rise or it skips that trigger. Shorten sweeptime / ramp %.")
 
         # --- Galvo: configure + start (free-running) the ACTIVE side only ---
         active_galvo = galvo_by_letter[letter]
@@ -801,7 +860,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             )
             return
 
-        galvo_period_ms = 1000.0 / galvo_freq if galvo_freq > 0 else self._etl_period_ms(ah)
+        galvo_period_ms = 1000.0 / galvo_freq if galvo_freq > 0 else self._etl_period_ms(ah, letter)
         # PATTERN_TRIANGLE/PATTERN_SQUARE require an even period in ms (see
         # asi_tiger_galvo_etl_demo.py) -- rounding here matches that script's own logic.
         galvo_pattern = PATTERN_TRIANGLE if 0.4 <= galvo_duty <= 0.6 else PATTERN_SAWTOOTH

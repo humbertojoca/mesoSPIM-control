@@ -33,9 +33,11 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 - Hardware laser gating (`laser_gate_with_expose_out` + `laser_blanking = 'stack'`, on in the user's config; and2 cells 8/9/11/16 = enable AND Expose-Out). Live 0.66 -> 0.43-0.44 s per frame (~2.1 fps), acquisition 0.67 -> 0.44 s per plane (2.08 fps). Per frame is now ~Expose-Out window (~0.39 s) + ~40 ms.
 - TTL Z (2026-10-06, `stage_ttl_bnc: 1`, `ttl_motion_enabled`, `ttl_cards: (2,)`, `ttl_axis_masks: {2: 1}`): 31 frames -> +310 um, +10 um per frame = the set step; theta and F unchanged (user). Frame time unchanged (~0.44 s). Each TTL step CORRUPTS a serial reply in flight (garbled bytes, ~1 per 2 frames); the Expose-Out poll now retries (returns None, never 0), the stage driver's poll just fails once.
 - Daily use: `ttl_motion_enabled: False` (user decision 2026-10-06: TTL Z saves no time per frame here, but it is kept and needed for a future hardware-only loop). The other TTL keys stay in the config.
+- v0.8 `etl_period_source: 'sweeptime'` (2026-10-06, Left, fluorescent solution): ETL ramp = sweeptime x max(ramp rising %, falling %), independent of exposure. 20 ms ASLM exposure: 0.25-0.26 s per frame, live 3.71 fps. At 200 ms (~2780 of 2960 rows expose at once, non-ASLM) the sweep-timed ETL looks off, as expected; use 20 ms. Measured sweep ~195-200 ms (predicted 213 ms with the 10.26 us line-time base).
 - Display skipping frames during acquisition is stock mesoSPIM (`camera_display_temporal_subsampling`, default 2), not a bug.
 
 ## Mock-only, still waiting for hardware confirmation
+- v0.8 sweeptime ETL: Right arm, acquisition at 20 ms, sweeptime tuning (~0.22 s to match the ~197 ms sweep), image quality on a structured sample.
 - TTL Z extras: a second step size, multi-row, and images of a real sample (none available on 2026-10-06).
 - Laser gating: optional scope check of laser BNC vs. Expose-Out (laser change during live is confirmed, log 20261006-150530).
 - Slow stage-position polling during live (Core patch needs re-applying).
