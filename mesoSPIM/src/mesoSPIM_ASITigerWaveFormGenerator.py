@@ -75,15 +75,35 @@ asicontrol.py, utils/acquisitions.py, and mesoSPIM_Camera.py (fetched
 and read directly, or user-supplied -- not assumed or inferred),
 findings that still apply to THIS design:
 
-  Call pattern (unchanged from before): prepare_acquisition() calls
+  Call pattern for a ROW/ACQUISITION SERIES: prepare_acquisition() calls
   prepare_image_series() -- create_tasks() + write_waveforms_to_tasks(),
-  ONCE per row. run_acquisition()'s `for i in range(steps)` loop then
+  once per row. run_acquisition()'s `for i in range(steps)` loop then
   calls snap_image_in_series() EACH iteration (laser enable ->
   start_tasks() -> run_tasks() -> stop_tasks() -> laser disable) --
-  once per frame. close_acquisition() calls close_image_series() --
-  close_tasks() -- ONCE, at the end. Every run_tasks() call in THIS
-  design does real, per-frame work (no "first call does everything,
-  rest no-op" pattern -- that was specific to the zstack_chain design).
+  once per frame. Every run_tasks() call in THIS design does real,
+  per-frame work (no "first call does everything, rest no-op" pattern
+  -- that was specific to the zstack_chain design).
+
+  CORRECTED (re-verified directly against the real mesoSPIM_Core.py --
+  an earlier version of this note said close_tasks() runs "ONCE, at
+  the end" of an acquisition list; that undersold how often it's
+  actually called): close_acquisition() -> close_image_series() ->
+  close_tasks() runs ONCE PER ROW, inside run_acquisition_list()'s
+  `for acq in acq_list:` loop -- not once for a whole multi-row list.
+  SEPARATELY, and even more frequently: snap_image() (used by BOTH
+  snap() and live()'s per-frame loop) calls ALL SIX methods --
+  create_tasks() THROUGH close_tasks() -- every single call, i.e.
+  every single live-preview frame. See close_tasks()'s own docstring
+  for the real consequence this had (an earlier version nulled all of
+  this class's device handles in close_tasks(), which combined with
+  this call frequency would have forced a full hardware re-setup, and
+  broken the free-running galvo's continuity, on every live frame and
+  every acquisition row -- fixed before ever reaching real hardware,
+  by reading the real source instead of assuming the call pattern from
+  the per-frame-series path alone). create_tasks()'s own
+  `if self._tiger is not None: return` guard is what makes setup
+  actually happen once, for the whole life of this backend instance,
+  regardless of which of these paths is calling it.
 
   Laser enable/disable is NOT this class's job -- run_acquisition()
   calls self.laserenabler.enable(laser)/disable_all() on a SEPARATE
@@ -184,6 +204,8 @@ import logging
 import time
 from typing import Optional
 
+import serial
+
 from .mesoSPIM_WaveFormGenerator import mesoSPIM_WaveFormGenerator
 
 from .devices.asi_tiger import (
@@ -195,6 +217,30 @@ from .devices.asi_tiger import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _state_get(state, key, default=None):
+    """self.state on real hardware is mesoSPIM_StateSingleton
+    (mesoSPIM_State.py), which ONLY implements __getitem__/__setitem__
+    -- NOT dict's .get() -- confirmed directly from its source.
+    REAL-HARDWARE BUG, caught by the user: every self.state.get(...)
+    call in this file crashed with "'mesoSPIM_StateSingleton' object
+    has no attribute 'get'" the first time write_waveforms_to_tasks()
+    ran. This went completely unnoticed in mock testing because the
+    mock harness's FakeState subclassed dict (which DOES have .get()),
+    silently matching the wrong interface. Fixed by routing every
+    state read through this helper instead, which works for both: the
+    real singleton (via __getitem__, catching the KeyError its own
+    mutexed access raises for a missing key) and a plain dict mock
+    (whose subscript access behaves identically). In practice every
+    key used in this file is always pre-populated by
+    mesoSPIM_StateSingleton.__init__()'s own hardcoded defaults, so
+    `default` here is a belt-and-suspenders fallback, not something
+    expected to be hit on real hardware."""
+    try:
+        return state[key]
+    except KeyError:
+        return default
 
 
 class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
@@ -213,6 +259,12 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         self._galvo_l: Optional[SingleAxisWaveform] = None
         self._galvo_r: Optional[SingleAxisWaveform] = None
         self._lr_switch = None  # LRSwitch
+        self._live_mode = False      # set by begin_live()/end_live() (see mesoSPIM_Core patch)
+        self._expose_width_warned = False
+        self._frame_expose_high_width_s = None
+        self._live_hold_dac = False  # live-only options, read from config in begin_live()
+        self._live_dac_levels = {}   # laser DAC channel -> volts last written during live
+        self._armed_key = None       # settings the ETL/galvo are currently armed/running with (live mode only)
 
         self._camera_trigger_cell = None
         self._camera_expose_bnc = None
@@ -299,7 +351,21 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         """See asi_tiger.controller.TigerController.from_open_serial for
         why sharing matters. Returns None (create_tasks() opens its own
         connection instead) if mesoSPIM's stage isn't ASI, or is on a
-        different COM port than asi_dac_parameters['port']."""
+        different COM port than asi_dac_parameters['port'].
+
+        REAL-HARDWARE BUG, caught by the user: merely reusing the
+        connection OBJECT isn't enough -- see from_open_serial()'s
+        updated docstring. This now also looks for a `serial_lock`
+        attribute on the stage driver (asi_stages) and passes it
+        through, so our commands and the stage driver's own
+        concurrent I/O (position polling, moves) actually serialize
+        against EACH OTHER, not just against themselves. Requires the
+        matching asicontrol.py patch (see
+        mesoSPIM_Core_patch_reference/asicontrol.py.diff) -- if
+        asi_stages has no `serial_lock` (an unpatched/older
+        StageControlASI), this falls back to the old, race-prone
+        behavior and logs a loud warning, rather than silently being
+        unsafe."""
         try:
             stage = self.parent.serial_worker.stage
             asi_stages = getattr(stage, "asi_stages", None)
@@ -313,7 +379,17 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
                     f"{ah['port']} -- different ports, opening a separate connection."
                 )
                 return None
-            return TigerController.from_open_serial(ser)
+            shared_lock = getattr(asi_stages, "serial_lock", None)
+            if shared_lock is None:
+                logger.error(
+                    "ASI Tiger: sharing the stage's serial connection, but it has no "
+                    "'serial_lock' attribute -- StageControlASI (asicontrol.py) needs the "
+                    "serial_lock patch (see PATCHNOTES_ASI_TIGER.md) for this sharing to be "
+                    "safe. Proceeding WITHOUT cross-driver locking -- this WILL intermittently "
+                    "corrupt replies on either side if stage position polling or moves happen "
+                    "concurrently with ASI Tiger triggered I/O (confirmed on real hardware)."
+                )
+            return TigerController.from_open_serial(ser, lock=shared_lock)
         except AttributeError:
             return None
 
@@ -325,7 +401,11 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         persistent device wrappers, INCLUDING the manual camera-trigger
         cell and the camera-expose -> ETL-sync wiring this per-frame
         design needs. Safe to call multiple times -- only does real
-        work the first time."""
+        work the first time, for the whole life of this backend
+        instance (this is load-bearing, not just an optimization --
+        see close_tasks()'s docstring: it's called far more often than
+        "once at the end", including once per live-preview frame, and
+        deliberately never undoes this method's setup)."""
         if self._tiger is not None:
             return
 
@@ -357,6 +437,15 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         self._etl_r = SingleAxisWaveform(self._tiger, card_addr=ah["etl_card_addr"], axis=ah["etl_r_axis"])
         self._etl_l.stop_and_zero()
         self._etl_r.stop_and_zero()
+        # Read-only, one-time: log what the ETL axes' output range really is (`PR <axis>?`
+        # -- the same query used for the laser/L-R-switch range work). The raw reply is
+        # only LOGGED, never parsed or enforced; use it to decide on etl_min/max_volts.
+        for _ax in (ah["etl_l_axis"], ah["etl_r_axis"]):
+            try:
+                _reply = self._tiger.send_command(f"PR {_ax}?", card_addr=ah["etl_card_addr"])
+                logger.info(f"ASI Tiger ETL range: card {ah['etl_card_addr']} `PR {_ax}?` -> {_reply!r}")
+            except Exception as exc:
+                logger.warning(f"ASI Tiger ETL range: `PR {_ax}?` failed ({exc}); continuing.")
         enable_backplane_trigger_mode(self._tiger, card_addr=ah["etl_card_addr"])
 
         # Per-arm galvo: free-running (ASI's own confirmed architecture -- see
@@ -460,7 +549,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         if explicit is not None:
             return explicit
         margin_ms = ah.get("etl_period_margin_ms", 0.0)
-        exposure_s = self.state.get("camera_exposure_time", 0.5)
+        exposure_s = _state_get(self.state, "camera_exposure_time", 0.5)
         period_ms = exposure_s * 1000.0 - margin_ms
         if period_ms < 2.0:
             logger.error(
@@ -509,7 +598,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         armed/running.
         """
         ah = self.cfg.asi_dac_parameters
-        side = self.state.get("shutterconfig", "Left")
+        side = _state_get(self.state, "shutterconfig", "Left")
         letter = "l" if side == "Left" else "r"
         other_letter = "r" if letter == "l" else "l"
 
@@ -518,15 +607,51 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         # validated/clamped in config_check(). laser_dac_channels is indexed the same
         # order as cfg.laserdict's keys -- confirm that ordering matches your config
         # (not independently verified here).
-        laser_name = self.state.get("laser")
+        laser_name = _state_get(self.state, "laser")
         laser_idx = list(self.cfg.laserdict.keys()).index(laser_name) if laser_name in self.cfg.laserdict else 0
-        intensity_pct = self.state.get("intensity", 0)
+        intensity_pct = _state_get(self.state, "intensity", 0)
         voltage = (intensity_pct / 100.0) * self.state["max_laser_voltage"]
         dac_ch = ah["laser_dac_channels"][laser_idx]["name"]
-        self._dac.set_voltage(dac_ch, voltage)
+        if self._live_mode and self._live_hold_dac:
+            # Live: hold the level between frames (the PLC enable line does the
+            # blanking); write only on change, and zero a laser line we just left.
+            try:
+                for other, volts in list(self._live_dac_levels.items()):
+                    if other != dac_ch and volts != 0.0:
+                        self._dac.set_voltage(other, 0.0)
+                        self._live_dac_levels[other] = 0.0
+                if self._live_dac_levels.get(dac_ch) != voltage:
+                    self._dac.set_voltage(dac_ch, voltage)
+                    self._live_dac_levels[dac_ch] = voltage
+            except BaseException:
+                self._live_dac_levels.clear()  # unknown -> rewrite next frame
+                raise
+        else:
+            self._dac.set_voltage(dac_ch, voltage)
 
         if self._lr_switch is not None:
             self._lr_switch.select(is_right=(side == "Right"))
+
+        # LIVE MODE ONLY: if the ETL + galvo are already armed/running with exactly
+        # these settings (previous live frame), leave them alone. Re-stopping,
+        # re-zeroing and re-starting them every frame cost ~40 of ~60 serial commands
+        # per frame AND visibly reset the light-sheet scan each frame. Any change to a
+        # setting changes the key and falls through to a full reconfigure below.
+        arm_key = (
+            side,
+            _state_get(self.state, f"etl_{letter}_amplitude", 0.0),
+            _state_get(self.state, f"etl_{letter}_offset", 0.0),
+            _state_get(self.state, f"etl_{letter}_ramp_rising_%", None),
+            _state_get(self.state, f"etl_{letter}_ramp_falling_%", None),
+            self._etl_period_ms(ah),
+            _state_get(self.state, f"galvo_{letter}_amplitude", 0.0),
+            _state_get(self.state, f"galvo_{letter}_offset", 0.0),
+            _state_get(self.state, f"galvo_{letter}_frequency", 100.0),
+            _state_get(self.state, f"galvo_{letter}_duty_cycle", 0.5),
+        )
+        if self._live_mode and arm_key == self._armed_key:
+            return
+        self._armed_key = None  # until (re)armed successfully below
 
         # --- Quiesce the INACTIVE side first (galvo AND ETL) -- a previous row may
         # have left it armed/running for the opposite side. ---
@@ -537,19 +662,56 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
 
         # --- ETL: configure + arm the ACTIVE side only ---
         active_etl = etl_by_letter[letter]
-        etl_amp = self.state.get(f"etl_{letter}_amplitude", 0.0)
-        etl_off = self.state.get(f"etl_{letter}_offset", 0.0)
+        etl_amp = _state_get(self.state, f"etl_{letter}_amplitude", 0.0)
+        etl_off = _state_get(self.state, f"etl_{letter}_offset", 0.0)
         etl_period_ms = self._etl_period_ms(ah)
-        active_etl.configure(pattern=PATTERN_SAWTOOTH, amplitude_v=etl_amp, offset_v=etl_off,
-                              period_ms=etl_period_ms, external_trigger=True)
-        active_etl.arm_triggered(free_running=False)
+        # Amplitude is passed through RAW (the user's decision: each system gets its
+        # numbers tuned anyway). Note for tuning: the Tiger's SAA is the TOTAL
+        # peak-to-peak amplitude (ASI command:saa), whereas mesoSPIM's NI ETL ramp
+        # swung offset +/- amplitude, so the same CSV number is a HALF-size sweep here.
+        amp_hw = etl_amp
+        # Optional: follow mesoSPIM's ramp DIRECTION. Its NI ramp rises over
+        # ramp_rising_% and falls over ramp_falling_%; the usual Right-arm settings
+        # (rise 5 / fall 85) are a DOWNWARD ramp. SAA's sign reverses the ramp
+        # (documented; geometry of the reversed ramp not yet bench-confirmed here,
+        # hence opt-in).
+        direction = "up"
+        if ah.get("etl_follow_ramp_direction", False):
+            rise = _state_get(self.state, f"etl_{letter}_ramp_rising_%", None)
+            fall = _state_get(self.state, f"etl_{letter}_ramp_falling_%", None)
+            if rise is not None and fall is not None and fall > rise:
+                amp_hw = -amp_hw
+                direction = "down"
+        etl_lo = etl_off - abs(amp_hw) / 2
+        etl_hi = etl_off + abs(amp_hw) / 2
+        # Voltage limits are OPT-IN: the ETL axes' real output range is a per-card PR
+        # setting that this code has not read from the hardware (see the one-time
+        # `PR <axis>?` log line written by create_tasks()), so no range is assumed.
+        etl_min_v = ah.get("etl_min_volts")
+        etl_max_v = ah.get("etl_max_volts")
+        out_of_range = ((etl_min_v is not None and etl_lo < float(etl_min_v)) or
+                        (etl_max_v is not None and etl_hi > float(etl_max_v)))
+        if out_of_range:
+            logger.error(
+                f"ASI Tiger ETL ({side}): offset {etl_off:.3f} V with {abs(amp_hw):.3f} Vpp would "
+                f"swing {etl_lo:.3f}..{etl_hi:.3f} V, outside your configured limits "
+                f"[etl_min_volts={etl_min_v}, etl_max_volts={etl_max_v}]. "
+                f"REFUSING to drive the ETL -- leaving it stopped and zeroed.")
+            active_etl.stop_and_zero()
+        else:
+            active_etl.configure(pattern=PATTERN_SAWTOOTH, amplitude_v=amp_hw, offset_v=etl_off,
+                                  period_ms=etl_period_ms, external_trigger=True)
+            active_etl.arm_triggered(free_running=False)
+            logger.info(f"ASI Tiger ETL ({side}): offset {etl_off:.3f} V, amplitude {abs(amp_hw):.3f} Vpp "
+                        f"(raw from state) -> sweep {etl_lo:.3f}..{etl_hi:.3f} V, {direction} ramp, "
+                        f"period {etl_period_ms:.0f} ms, armed on external trigger")
 
         # --- Galvo: configure + start (free-running) the ACTIVE side only ---
         active_galvo = galvo_by_letter[letter]
-        galvo_amp = self.state.get(f"galvo_{letter}_amplitude", 0.0)
-        galvo_off = self.state.get(f"galvo_{letter}_offset", 0.0)
-        galvo_freq = self.state.get(f"galvo_{letter}_frequency", 100.0)
-        galvo_duty = self.state.get(f"galvo_{letter}_duty_cycle", 0.5)
+        galvo_amp = _state_get(self.state, f"galvo_{letter}_amplitude", 0.0)
+        galvo_off = _state_get(self.state, f"galvo_{letter}_offset", 0.0)
+        galvo_freq = _state_get(self.state, f"galvo_{letter}_frequency", 100.0)
+        galvo_duty = _state_get(self.state, f"galvo_{letter}_duty_cycle", 0.5)
 
         galvo_max_volts = ah.get("galvo_max_volts", 10.0)
         galvo_peak = abs(galvo_amp) / 2 + abs(galvo_off)
@@ -573,6 +735,8 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         active_galvo.configure(pattern=galvo_pattern, amplitude_v=galvo_amp, offset_v=galvo_off,
                                 period_ms=galvo_period_ms)
         active_galvo.start()
+        if self._live_mode:
+            self._armed_key = arm_key
 
     def start_tasks(self):
         """No-op for this design -- the ETL is armed once per row in
@@ -598,36 +762,108 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         the exposure finished). Checking only for LOW immediately after
         triggering would risk reading the PRE-trigger idle state as
         "already done".
+
+        POLL INTERVAL, revised after a real-hardware hang: this
+        originally polled read_bnc_inputs() every 1ms, which is one
+        full serial round-trip (write+flush+read) over the shared
+        Tiger port every 1ms -- far faster than the controller can
+        actually answer, and, confirmed from a hang_dump.txt, enough
+        sustained command flood (on top of this backend's already
+        heavier-than-NI traffic pattern) to eventually stall a write
+        completely. controller.py's from_open_serial() now gives that
+        write a finite timeout so it fails loudly instead of hanging
+        forever, but the real fix is not flooding the port that hard
+        in the first place. 5ms still resolves Expose-Out transitions
+        well inside any real exposure time (typically tens to
+        hundreds of ms) while cutting command volume 5x; each
+        round-trip is also wrapped so one flaky/timed-out poll logs
+        and keeps waiting instead of aborting the whole frame.
         """
         ah = self.cfg.asi_dac_parameters
         pulse_ms = ah.get("camera_trigger_pulse_ms", 10.0)
         expose_bit = 1 << (self._camera_expose_bnc - 1)
+        t_run0 = time.perf_counter()
+        self._frame_expose_high_wait_s = None
+        self._frame_expose_high_width_s = None
+        t_high_seen = None
+        poll_interval_s = ah.get("camera_expose_poll_interval_s", 0.005)
 
         self._plc.set_cell_state(self._camera_trigger_cell, True)
         time.sleep(pulse_ms / 1000.0)
         self._plc.set_cell_state(self._camera_trigger_cell, False)
 
+        def _poll_expose_bit():
+            """read_bnc_inputs(), swallowing a single timed-out/garbled
+            round-trip so one bad poll doesn't abort the whole frame --
+            the surrounding while-loop's own timeout is still what
+            decides when to give up for real."""
+            try:
+                return self._plc.read_bnc_inputs()
+            except (TimeoutError, serial.SerialTimeoutException) as exc:
+                logger.error(f"ASI Tiger: read_bnc_inputs() poll failed ({exc}) -- "
+                              f"retrying until this phase's own timeout.")
+                return 0
+
         start_timeout_s = ah.get("camera_expose_start_timeout_s", 2.0)
         start = time.perf_counter()
         while time.perf_counter() - start < start_timeout_s:
-            if self._plc.read_bnc_inputs() & expose_bit:
+            if _poll_expose_bit() & expose_bit:
+                t_high_seen = time.perf_counter()
+                self._frame_expose_high_wait_s = t_high_seen - start
                 break
-            time.sleep(0.001)
+            time.sleep(poll_interval_s)
         else:
             logger.error(f"ASI Tiger: camera Expose-Out never went high within "
                           f"{start_timeout_s:.1f}s of triggering -- exposure may not have "
                           f"started. Proceeding anyway.")
 
-        exposure_time_s = self.state.get("camera_exposure_time", 0.5)
+        exposure_time_s = _state_get(self.state, "camera_exposure_time", 0.5)
         end_timeout_s = ah.get("camera_expose_end_timeout_margin_s", 2.0) + exposure_time_s
         start = time.perf_counter()
         while time.perf_counter() - start < end_timeout_s:
-            if not (self._plc.read_bnc_inputs() & expose_bit):
+            if not (_poll_expose_bit() & expose_bit):
+                t_low_seen = time.perf_counter()
+                self._frame_run_tasks_s = t_low_seen - t_run0
+                if t_high_seen is not None:
+                    # Resolution is about one poll round-trip (~20-30 ms on this link).
+                    self._frame_expose_high_width_s = t_low_seen - t_high_seen
+                    self._check_expose_width(exposure_time_s)
                 return
-            time.sleep(0.001)
+            time.sleep(poll_interval_s)
+        self._frame_run_tasks_s = time.perf_counter() - t_run0
         logger.error(f"ASI Tiger: camera Expose-Out never went low within "
                       f"{end_timeout_s:.1f}s -- exposure may still be in progress. "
                       f"Proceeding anyway.")
+
+    def _check_expose_width(self, exposure_time_s):
+        """One-time (per live session / backend instance) WARNING when the measured
+        Expose-Out high time is far shorter than the exposure. Found on the user's
+        bench: with camera_parameters['exp_out_mode'] = 1 (All Rows) the scope showed
+        only a short pulse. PVCAM's All Rows signal is high for exactly the exposure
+        time, and this backend (a) starts the ETL on Expose-Out's rising edge and
+        (b) treats Expose-Out going low as 'exposure finished' (which also releases
+        the laser blanking), so a short pulse means the ETL sweep and the end-of-
+        exposure detection are not aligned with the real exposure."""
+        ah = self.cfg.asi_dac_parameters
+        width = getattr(self, "_frame_expose_high_width_s", None)
+        if width is None or getattr(self, "_expose_width_warned", False):
+            return
+        if exposure_time_s < float(ah.get("expose_width_check_min_exposure_s", 0.1)):
+            return  # too short to measure with ~one-poll (~25 ms) resolution
+        frac = float(ah.get("expose_width_warn_fraction", 0.5))
+        if width < frac * exposure_time_s:
+            self._expose_width_warned = True
+            msg = (f"ASI Tiger WARNING: Expose-Out was high for only ~{width*1000:.0f} ms (poll "
+                   f"resolution ~25 ms) but the exposure is {exposure_time_s*1000:.0f} ms. This is NOT "
+                   f"necessarily a wrong camera mode: in 'All Rows' mode (exp_out_mode=1) the signal is high "
+                   f"only while EVERY row is exposing, i.e. about (exposure - rolling-shutter sweep time), and "
+                   f"with a long camera_parameters['scan_line_delay'] (ASLM) the sweep can take most of the "
+                   f"exposure, leaving a short pulse near its END. The ETL sweep (started by Expose-Out's "
+                   f"rising edge) and the end-of-exposure/laser-blanking timing then start late / end early. "
+                   f"For ASLM try exp_out_mode=2 (Any Row: high from the first row's start to the last row's end). "
+                   f"Shown once per live session; silence with asi_dac_parameters['expose_width_warn_fraction']=0.")
+            logger.warning(msg)
+            print(msg, flush=True)
 
     def stop_tasks(self):
         """No-op for this design -- see start_tasks()'s docstring. The
@@ -635,31 +871,37 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         once, at the actual end."""
         pass
 
-    def close_tasks(self):
-        """
-        Stops/zeros both ETL axes and both galvo axes (whichever was
-        active for the last row, plus the inactive one defensively),
-        THEN safes all PLC outputs and zeros the DAC BEFORE
-        disconnecting.
+    def _log_frame_timing(self):
+        """One WARNING line per snap_image() cycle: how many serial
+        commands it took, how long they spent on the wire, the slowest one,
+        and how long run_tasks() waited for Expose-Out. Exists to show where
+        a slow live() frame really goes. Silence with
+        asi_dac_parameters['frame_timing_log'] = False."""
+        if not self.cfg.asi_dac_parameters.get("frame_timing_log", True):
+            return
+        if self._tiger is None:
+            return
+        n, wire_s, max_s, max_cmd = self._tiger.take_stats()
+        now = time.perf_counter()
+        wall = now - getattr(self, "_frame_prev_t", now)
+        self._frame_prev_t = now
+        hw = getattr(self, "_frame_expose_high_wait_s", None)
+        hw_txt = "NEVER went high (timed out)" if hw is None else f"{hw*1000:.0f} ms"
+        wd = getattr(self, "_frame_expose_high_width_s", None)
+        if wd is not None:
+            hw_txt += f", high for ~{wd*1000:.0f} ms (exposure {_state_get(self.state, 'camera_exposure_time', 0.0)*1000:.0f} ms)"
+        msg = (
+            f"ASI Tiger frame timing: {wall:.2f}s since last frame | {n} serial cmds, "
+            f"{wire_s:.2f}s on wire (avg {1000*wire_s/max(n,1):.0f} ms, slowest "
+            f"{max_s*1000:.0f} ms = {max_cmd!r}) | run_tasks {getattr(self, '_frame_run_tasks_s', 0.0):.2f}s, "
+            f"Expose-Out high after: {hw_txt}"
+        )
+        logger.warning(msg)  # goes to mesoSPIM's log file (see mesoSPIM/log/)
+        print(msg, flush=True)  # and the console, since mesoSPIM logs to a file only
 
-        IMPORTANT (carried over from earlier drafts, still true): the
-        PLC keeps running its programmed logic in hardware regardless of
-        the host connection -- confirmed on real hardware that a
-        configured toggle/gate kept switching well after the controlling
-        process exited. plc.clear_state() alone does NOT stop this; only
-        reconfiguring the physical outputs back to inputs does (see
-        asi_tiger/plc.py's docstrings). This method does that via
-        safe_all_outputs() BEFORE zeroing the DAC and disconnecting, so a
-        mesoSPIM session ending (normally or via a crash caught by
-        whatever wraps this) actually leaves lasers/switch/camera-trigger
-        lines quiet. Note this does NOT stop a free-running galvo by
-        itself (galvo isn't a PLC-driven output) -- that's why both
-        galvo axes get their own explicit stop_and_zero() below, same as
-        the ETL axes.
-
-        Does NOT close the shared serial connection if it's owned by the
-        ASI stage driver -- only closes it if this instance opened it.
-        """
+    def _stop_axes(self):
+        """Stop + zero both ETL axes and both galvo axes."""
+        self._armed_key = None
         for name, axis in (("ETL L", self._etl_l), ("ETL R", self._etl_r),
                             ("galvo L", self._galvo_l), ("galvo R", self._galvo_r)):
             if axis is not None:
@@ -667,25 +909,174 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
                     axis.stop_and_zero()
                 except Exception as exc:
                     logger.error(f"ASI Tiger {name}: error stopping/zeroing on close: {exc}")
+
+    def begin_live(self):
+        """Called by mesoSPIM_Core.live() (see the Core patch) before its frame loop.
+        While live, close_tasks() leaves the ETL/galvo running between frames and
+        write_waveforms_to_tasks() only reconfigures them when a setting changes."""
+        ah = getattr(self.cfg, "asi_dac_parameters", {})
+        self._live_hold_dac = bool(ah.get("live_hold_laser_dac", True))
+        track_ptr = bool(ah.get("live_track_plc_pointer", True))
+        self._live_dac_levels = {}
+        self._expose_width_warned = False
+        self._live_mode = True
+        self._armed_key = None
+        # Start every live session from "unknown" PLC cell states / pointer so the
+        # first frame re-establishes them for real (later frames skip redundant
+        # writes and, if enabled, redundant pointer moves).
         if self._plc is not None:
+            self._plc.invalidate_state_cache()
+            self._plc.track_pointer = track_ptr
+        logger.info(f"ASI Tiger live mode: hold laser DAC between frames={self._live_hold_dac}, "
+                    f"track PLC pointer={track_ptr}")
+
+    def end_live(self):
+        """Called by mesoSPIM_Core.live() after its frame loop: back to the normal
+        stop-everything-after-every-close behavior, and stop the ETL/galvo now."""
+        was_holding = self._live_mode and self._live_hold_dac
+        self._live_mode = False
+        self._live_dac_levels = {}
+        if self._plc is not None:
+            self._plc.track_pointer = False
+            self._plc.invalidate_state_cache()
+        if was_holding and self._dac is not None:
+            # live held the laser level between frames; put every laser channel
+            # back to 0 V now (the L/R switch channel keeps its last side).
             try:
-                self._plc.safe_all_outputs()
+                for ch_name in self._dac.channel_names():
+                    if self._lr_switch is not None and ch_name == self._lr_switch.channel_name:
+                        continue
+                    self._dac.set_voltage(ch_name, 0.0)
             except Exception as exc:
-                logger.error(f"ASI Tiger PLC: error safing outputs on close: {exc}")
-        if self._dac is not None:
+                logger.error(f"ASI Tiger DAC: error zeroing at end of live: {exc}")
+        self._stop_axes()
+
+    def safe_outputs(self):
+        """Full teardown: reconfigure every PLC output this instance set up
+        to constant-low. This DISCONNECTS the camera trigger / ETL sync /
+        laser-enable wiring, so call it only when really done (e.g. a future
+        app-exit hook); the next session must re-run create_tasks() setup."""
+        if self._plc is not None:
+            self._plc.safe_all_outputs()
+            self._tiger = None  # force create_tasks() to rebuild wiring next time
+
+    def close_tasks(self):
+        """
+        Returns all outputs to a safe idle state -- stops/zeros both ETL
+        axes and both galvo axes, idles the camera-trigger cell, and zeros
+        the DAC. (UPDATED: it no longer calls safe_all_outputs() -- that
+        severed the PLC wiring after the first frame; see the comment in
+        the body and PATCHNOTES_ASI_TIGER.md. Use safe_outputs() for a full
+        teardown. The paragraphs below that describe safe_all_outputs() as
+        part of close_tasks() predate this change.) Deliberately does NOT release/disconnect anything or reset
+        any of this instance's device handles -- see the "REAL CALL
+        FREQUENCY" note below for why that would be actively harmful
+        here, unlike for the NI backend this class mirrors.
+
+        REAL CALL FREQUENCY (confirmed by fetching the real
+        mesoSPIM_Core.py directly, not assumed -- an earlier version of
+        this docstring incorrectly assumed close_tasks() is called
+        "once, at the actual end" of a whole acquisition list; it is
+        NOT):
+          - snap_image() (used by BOTH snap() and live()'s per-frame
+            loop) calls create_tasks() -> write_waveforms_to_tasks() ->
+            ... -> close_tasks(), ALL SIX METHODS, EVERY SINGLE CALL --
+            once per snap, and once per frame of a live-preview loop.
+          - close_acquisition() (-> close_image_series() ->
+            close_tasks()) is called ONCE PER ROW inside
+            run_acquisition_list()'s `for acq in acq_list:` loop, i.e.
+            once per acquisition/row, NOT once at the end of a
+            multi-row list.
+        For the NI backend, this is fine: create_tasks()/close_tasks()
+        build and tear down finite nidaqmx.Task() buffers every call by
+        design (a fresh one-shot AO sweep has to be written before every
+        trigger cycle regardless). This backend's hardware is the
+        opposite: the Tiger connection, PLC cell config, and
+        SingleAxisWaveform objects are meant to be set up ONCE and left
+        alone -- create_tasks() is written to be a no-op on every call
+        after the first (`if self._tiger is not None: return`). If
+        close_tasks() nulled those handles (as an earlier version of
+        this method did), every single live-preview frame -- and every
+        single row of a multi-row acquisition -- would trigger a full
+        re-setup (PLC clear_state, DAC channel re-add, ETL/galvo
+        re-instantiate, backplane-trigger-mode re-enable, camera-trigger
+        cell + Expose-Out wiring reconfigured from scratch) immediately
+        followed by tearing it all back down again -- at minimum a lot
+        of wasted serial round-trips, and for live() specifically, the
+        free-running galvo would never actually run continuously: it
+        would be started, then immediately stop_and_zero()'d, every
+        single frame, rather than scanning smoothly for the whole
+        preview. NOT yet confirmed on real hardware how visually bad
+        that would have looked -- caught by re-reading the real
+        mesoSPIM_Core.py before ever reaching that hardware test, so
+        there's no real-hardware evidence of the broken behavior to
+        report, only the source-level confirmation of why it would have
+        happened.
+
+        IMPORTANT (carried over from earlier drafts, still true): the
+        PLC keeps running its programmed logic in hardware regardless of
+        the host connection -- confirmed on real hardware that a
+        configured toggle/gate kept switching well after the controlling
+        process exited. plc.clear_state() alone does NOT stop this; only
+        reconfiguring the physical outputs back to inputs (or, as this
+        project's actual fix does, to a driven constant) does -- see
+        asi_tiger/plc.py's docstrings. This method does that via
+        safe_all_outputs(). Note this does NOT stop a free-running galvo
+        by itself (galvo isn't a PLC-driven output) -- that's why both
+        galvo axes get their own explicit stop_and_zero() below, same as
+        the ETL axes. Since this now runs after every frame/row rather
+        than once, this is actually MORE protective than before against
+        anything being left mid-sweep if mesoSPIM stops an acquisition
+        or a live preview abruptly.
+
+        What this means for true application exit: there's no dedicated
+        "app is closing for real" hook exposed to the waveformer at all
+        (checked directly in mesoSPIM_Core.py -- no closeEvent/exit
+        handler calls anything on self.waveformer beyond the same 6
+        methods used throughout a normal run). A connection this
+        instance opened itself (self._owns_tiger_connection) is
+        therefore left open for the life of the mesoSPIM-control
+        process, the same way mesoSPIM's own ASI stage driver
+        (StageControlASI) already leaves ITS serial connection open with
+        no explicit final close call either -- consistent with this
+        codebase's existing convention, not a new risk this file
+        introduces. The OS reclaims the port on process exit either way.
+        """
+        if not self._live_mode:
+            self._stop_axes()
+        if self._plc is not None:
+            # NOT safe_all_outputs() here. REAL-HARDWARE FINDING (from the
+            # frame-timing log): safe_all_outputs() reconfigures EVERY PLC
+            # output (camera-trigger BNC, ETL backplane trigger-in lines,
+            # laser-enable BNCs) to push-pull driven by constant-low --
+            # i.e. it DISCONNECTS the wiring create_tasks() set up once.
+            # Since create_tasks() never re-runs, every frame after the first
+            # fired a camera-trigger cell that no longer reached the BNC, and
+            # the laser-enable cells no longer reached their BNCs either. It
+            # also cost ~20-30 serial commands per frame. Per-frame idle
+            # safety is instead: camera-trigger cell low (below), laser
+            # cells low (mesoSPIM calls laserenabler.disable_all() after each
+            # frame), ETL/galvo stopped+zeroed (above), DAC zeroed (below).
+            # Call safe_outputs() explicitly for a full teardown.
             try:
-                self._dac.zero_all()
+                self._plc.set_cell_state(self._camera_trigger_cell, False)
+            except Exception as exc:
+                logger.error(f"ASI Tiger PLC: error idling camera trigger on close: {exc}")
+        if self._dac is not None and not (self._live_mode and self._live_hold_dac):
+            try:
+                # Zero the laser-intensity channels only. zero_all() would also drive
+                # the L/R arm switch to 0 V after EVERY frame, so with Right selected
+                # the switch would flip 5V -> 0V -> 5V each frame (and park on the
+                # 0 V arm between frames). The switch just holds its last side;
+                # write_waveforms_to_tasks() sets it again whenever the row changes.
+                for ch_name in self._dac.channel_names():
+                    if self._lr_switch is not None and ch_name == self._lr_switch.channel_name:
+                        continue
+                    self._dac.set_voltage(ch_name, 0.0)
             except Exception as exc:
                 logger.error(f"ASI Tiger DAC: error zeroing on close: {exc}")
-        if self._owns_tiger_connection and self._tiger is not None:
-            self._tiger.disconnect()
-        self._tiger = None
-        self._plc = None
-        self._dac = None
-        self._etl_l = None
-        self._etl_r = None
-        self._galvo_l = None
-        self._galvo_r = None
-        self._lr_switch = None
-        self._camera_trigger_cell = None
-        self._camera_expose_bnc = None
+        self._log_frame_timing()
+        # Deliberately NOT disconnecting or nulling self._tiger/_plc/_dac/etc here
+        # -- see this method's docstring ("REAL CALL FREQUENCY") for why. create_tasks()'s
+        # existing `if self._tiger is not None: return` guard is what actually makes
+        # setup happen once, for the whole life of this backend instance.

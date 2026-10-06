@@ -1,0 +1,195 @@
+--- a/mesoSPIM/src/mesoSPIM_Core.py	2026-10-05 19:22:18.738694599 -0300
++++ b/mesoSPIM/src/mesoSPIM_Core.py	2026-10-05 19:22:18.741414461 -0300
+@@ -29,9 +29,11 @@
+ 
+ from .devices.lasers.Demo_LaserEnabler import Demo_LaserEnabler
+ from .devices.lasers.mesoSPIM_LaserEnabler import mesoSPIM_LaserEnabler
++from .devices.lasers.ASITiger_LaserEnabler import ASITiger_LaserEnabler
+ 
+ from .mesoSPIM_Serial import mesoSPIM_Serial
+ from .mesoSPIM_WaveFormGenerator import mesoSPIM_WaveFormGenerator, mesoSPIM_DemoWaveFormGenerator
++from .mesoSPIM_ASITigerWaveFormGenerator import mesoSPIM_ASITigerWaveFormGenerator
+ from .mesoSPIM_ImageWriter import mesoSPIM_ImageWriter
+ 
+ from .utils.acquisitions import AcquisitionList, Acquisition
+@@ -80,6 +82,7 @@
+     sig_center_sample = QtCore.pyqtSignal()
+ 
+     sig_polling_stage_position_start, sig_polling_stage_position_stop = QtCore.pyqtSignal(), QtCore.pyqtSignal()
++    sig_polling_stage_position_set_interval = QtCore.pyqtSignal(int)  # ASI Tiger: slow poll while live/acquiring
+ 
+     ''' ETL-related signals '''
+     sig_save_etl_config = QtCore.pyqtSignal()
+@@ -156,6 +159,9 @@
+         #self.serial_worker.sig_pause.connect(self.pause)
+         self.sig_polling_stage_position_start.connect(self.serial_worker.stage.pos_timer.start)
+         self.sig_polling_stage_position_stop.connect(self.serial_worker.stage.pos_timer.stop)
++        self.sig_polling_stage_position_set_interval.connect(self.serial_worker.stage.pos_timer.setInterval)
++        self._pos_poll_normal_ms = self.serial_worker.stage.pos_timer.interval()  # 100 ms in stock mesoSPIM
++        self._pos_poll_throttled = False
+         self.sig_move_absolute.connect(self.serial_worker.move_absolute)
+         self.sig_move_relative.connect(self.serial_worker.move_relative)
+         self.sig_move_relative_and_wait_until_done.connect(lambda sdict: self.serial_worker.move_relative(sdict, wait_until_done=True))
+@@ -174,6 +180,8 @@
+             self.waveformer = mesoSPIM_WaveFormGenerator(self)
+         elif self.cfg.waveformgeneration == 'DemoWaveFormGeneration':
+             self.waveformer = mesoSPIM_DemoWaveFormGenerator(self)
++        elif self.cfg.waveformgeneration == 'ASI_Tiger':
++            self.waveformer = mesoSPIM_ASITigerWaveFormGenerator(self)
+ 
+         self.waveformer.sig_update_gui_from_state.connect(self.sig_update_gui_from_state.emit)
+         # Signals from Core
+@@ -202,6 +210,8 @@
+         ''' Setting the laser enabler up '''
+         if self.cfg.laser in ('NI', 'cDAQ'):
+             self.laserenabler = mesoSPIM_LaserEnabler(self.cfg.laserdict)
++        elif self.cfg.laser == 'ASI_Tiger':
++            self.laserenabler = ASITiger_LaserEnabler(self.cfg.laserdict, self)
+         elif 'demo' in self.cfg.laser.lower():
+             self.laserenabler = Demo_LaserEnabler(self.cfg.laserdict)
+ 
+@@ -410,7 +420,7 @@
+         self.sig_stop_aquisition.emit() # send STOP signal to both Camera and ImageWriter threads
+         if self.TTL_mode_enabled_in_cfg is True:
+             self.sig_state_request.emit({'ttl_movement_enabled_during_acq': False})
+-        self.sig_polling_stage_position_start.emit()
++        self._stage_polling_resume()
+         self.state['state'] = 'idle'
+         self.sig_update_gui_from_state.emit()
+         self.frame_queue.clear() # clear the frame queue
+@@ -662,12 +672,53 @@
+     '''
+     Sub-Imaging modes
+     '''
++    def _stage_poll_during_run_ms(self):
++        """ASI Tiger only: interval (ms) at which to KEEP polling stage positions while
++        live/snap/acquisition runs, from asi_dac_parameters['stage_poll_interval_ms_during_run'].
++        None (key absent / 0) = pause polling entirely (the confirmed-working default)."""
++        if getattr(self.cfg, 'waveformgeneration', None) != 'ASI_Tiger':
++            return None
++        ah = getattr(self.cfg, 'asi_dac_parameters', None)
++        ms = ah.get('stage_poll_interval_ms_during_run') if isinstance(ah, dict) else None
++        return int(ms) if ms else None
++
++    def _stage_polling_pause(self):
++        """Replaces the stock 'stop polling during acquisition' emit. With an ASI Tiger
++        and stage_poll_interval_ms_during_run set, polling continues but SLOWLY
++        (one cheap 'W <axes>' query per interval) so the GUI keeps showing correct
++        positions; otherwise polling stops exactly as in stock mesoSPIM."""
++        ms = self._stage_poll_during_run_ms()
++        if ms:
++            self.sig_polling_stage_position_set_interval.emit(ms)
++            self._pos_poll_throttled = True
++            self.sig_polling_stage_position_start.emit()
++        else:
++            self.sig_polling_stage_position_stop.emit()
++
++    def _stage_polling_pause_for_live(self):
++        """snap()/live(): stock mesoSPIM never paused polling here, so only the ASI Tiger
++        backend (shared serial port) does -- NI/Demo users keep stock behaviour."""
++        if getattr(self.cfg, 'waveformgeneration', None) == 'ASI_Tiger':
++            self._stage_polling_pause()
++
++    def _stage_polling_resume(self):
++        """Back to normal-rate polling (restores the interval if it was slowed)."""
++        if self._pos_poll_throttled:
++            self.sig_polling_stage_position_set_interval.emit(self._pos_poll_normal_ms)
++            self._pos_poll_throttled = False
++        self.sig_polling_stage_position_start.emit()
++
+     def snap(self, write_flag=True, laser_blanking=True):
+         self.sig_prepare_live.emit()
++        # Pause stage-position polling for the duration of this snap -- see
++        # live()'s matching comment below for why (ASI Tiger integration:
++        # a real-hardware finding, shared-serial-port contention).
++        self._stage_polling_pause_for_live()
+         self.open_shutters()
+         self.snap_image(laser_blanking)
+         self.sig_get_snap_image.emit(write_flag)
+         self.close_shutters()
++        self._stage_polling_resume()
+         self.sig_end_live.emit()
+         self.sig_finished.emit()
+         QtWidgets.QApplication.processEvents()
+@@ -727,24 +778,51 @@
+         """
+         self.stopflag = False
+         self.sig_prepare_live.emit()
++        # Pause stage-position polling for the whole live-preview run, not
++        # just multi-row acquisitions (prepare_acquisition() already did
++        # this, but live()/snap() never did). REAL-HARDWARE FINDING (ASI
++        # Tiger integration project): when an ASI-Tiger-backed waveformer
++        # shares its one physical serial port with the ASI stage driver
++        # (see mesoSPIM_ASITigerWaveFormGenerator._get_shared_tiger_connection()
++        # and its serial_lock), leaving this polling running concurrently
++        # doesn't corrupt replies anymore (the shared lock fixed that), but
++        # it DOES make every single command on both sides take turns and
++        # occasionally eat the other side's multi-second serial timeout --
++        # confirmed on real hardware to make live() unusably slow (tens of
++        # seconds per frame) even though nothing was actually broken.
++        # Pausing the poller removes the contention entirely rather than
++        # just making it survivable. resume (sig_polling_stage_position_start)
++        # happens below AND in stop() -- both emits are harmless/idempotent
++        # if the timer is already running.
++        self._stage_polling_pause_for_live()
+         laser = self.state['laser']
+         laser_blanking = False if (hasattr(self.cfg, 'laser_blanking') and (self.cfg.laser_blanking in ('stack', 'stacks'))) else True
+         self.laserenabler.enable(laser)
+-        while self.stopflag is False:
+-            ''' How to handle a possible shutter switch?'''
+-            self.open_shutters()
+-            ''' Needs update to use snap image in series '''
+-            self.snap_image(laser_blanking)
+-            self.sig_get_live_image.emit()
+-
+-#            while self.pauseflag is True:
+-#                time.sleep(0.1)
+-#                QtWidgets.QApplication.processEvents()
+-
+-            QtWidgets.QApplication.processEvents()
++        # ASI Tiger: keep ETL/galvo running between live frames instead of
++        # stopping and re-arming them every frame (see PATCHNOTES_ASI_TIGER.md).
++        # Other waveformers don't define these hooks.
++        if hasattr(self.waveformer, 'begin_live'):
++            self.waveformer.begin_live()
++        try:
++            while self.stopflag is False:
++                ''' How to handle a possible shutter switch?'''
++                self.open_shutters()
++                ''' Needs update to use snap image in series '''
++                self.snap_image(laser_blanking)
++                self.sig_get_live_image.emit()
++
++    #            while self.pauseflag is True:
++    #                time.sleep(0.1)
++    #                QtWidgets.QApplication.processEvents()
++
++                QtWidgets.QApplication.processEvents()
++        finally:
++            if hasattr(self.waveformer, 'end_live'):
++                self.waveformer.end_live()
+ 
+         self.laserenabler.disable_all()
+         self.close_shutters()
++        self._stage_polling_resume()
+         self.sig_end_live.emit()
+         self.sig_finished.emit()
+ 
+@@ -881,7 +959,7 @@
+ 
+             self.state['state'] = 'idle'
+             self._move_absolute_responsive(acq_list.get_startpoint())
+-            self.sig_polling_stage_position_start.emit()  # resume asking stages about their position
++            self._stage_polling_resume()  # resume asking stages about their position
+ 
+             self.set_filter(acq_list[0]['filter'])
+             self.set_laser(acq_list[0]['laser'], wait_until_done=False, update_etl=False)
+@@ -1007,7 +1085,7 @@
+         self.acq_start_time = time.time()
+         self.acq_start_time_string = time.strftime("%Y%m%d-%H%M%S")
+         # stop asking stages about their positions, to avoid messing up serial comm during acquisition. Position polling runs in MainWindow GUI thread, not in Core thread!
+-        self.sig_polling_stage_position_stop.emit()
++        self._stage_polling_pause()
+         self.sig_status_message.emit('Going to start position')
+         ''' Check if sample has to be rotated, allow some tolerance '''
+         if current_rotation > target_rotation+0.1 or current_rotation < target_rotation-0.1:

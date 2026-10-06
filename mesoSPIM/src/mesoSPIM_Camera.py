@@ -567,6 +567,10 @@ class mesoSPIM_PhotometricsCamera(mesoSPIM_GenericCamera):
         '''
         self.pvcam.binning = (self.x_binning, self.y_binning)
 
+        logger.info('Exposure out mode (read-back): ' + str(self.pvcam.get_param(param_id=self.const.PARAM_EXPOSE_OUT_MODE)))
+        logger.info('Exposure mode (read-back): ' + str(self.pvcam.get_param(param_id=self.const.PARAM_EXPOSURE_MODE)))
+        logger.info('cfg exp_out_mode: ' + str(self.cfg.camera_parameters['exp_out_mode']) + ', cfg file: ' + str(getattr(self.cfg, '__file__', '?')))
+        
         #self.pvcam.set_param(param_id = self.const.PARAM_BINNING_PAR, value = self.y_binning)
         #self.pvcam.set_param(param_id = self.const.PARAM_BINNING_SER, value = self.x_binning)
 

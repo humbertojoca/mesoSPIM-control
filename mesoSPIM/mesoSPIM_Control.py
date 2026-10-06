@@ -17,6 +17,10 @@ import sys
 import importlib.util
 from PyQt5 import QtWidgets, QtCore
 import qdarkstyle
+
+import faulthandler
+faulthandler.dump_traceback_later(15, repeat=True, file=open("hang_dump.txt", "w"), exit=False)
+
 package_directory = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(
     package_directory))  # this is critical for 'from mesoSPIM.src.mesoSPIM_MainWindow import mesoSPIM_MainWindow' to work in both script and package form.

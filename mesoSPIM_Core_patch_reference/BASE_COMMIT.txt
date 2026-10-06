@@ -1,0 +1,52 @@
+mesoSPIM-control patch reference materials
+============================================
+Based on a real clone of github.com/mesoSPIM/mesoSPIM-control,
+commit 98d74d35bdc6dbc9523cf9ddbed59f262b629a66 (2026-07-22 16:21:42 +0200).
+
+TWO separate real files need patching -- apply both.
+
+mesoSPIM_Core.py:
+  mesoSPIM_Core.py.orig     -- that commit's real, unmodified mesoSPIM_Core.py
+  mesoSPIM_Core.py.patched  -- the same file with these additions applied (see also the live() hooks below):
+                                1) the ASI_Tiger waveformgeneration elif branch
+                                2) the ASI_Tiger laser elif branch (new -- wires
+                                   up ASITiger_LaserEnabler for cfg.laser =
+                                   'ASI_Tiger', see devices/lasers/ASITiger_LaserEnabler.py)
+  mesoSPIM_Core.py.diff     -- a real unified diff (proper a/ b/ paths), apply from your
+                                mesoSPIM-control repo root with:
+                                  git apply mesoSPIM_Core_patch_reference/mesoSPIM_Core.py.diff
+                                Verified with `git apply --check` against the exact commit
+                                above -- applies cleanly.
+
+mesoSPIM/src/devices/stages/asi/asicontrol.py (NEW, added after a real-hardware
+finding -- see PATCHNOTES_ASI_TIGER.md's "intermittent garbled serial reply"
+entry: the ASI Tiger DAC/PLC driver shares ONE physical serial port with your
+ASI stage driver, and without this patch there's no lock serializing the two,
+so stage position polling and ASI-Tiger-triggered I/O can corrupt each
+other's replies):
+  asicontrol.py.orig     -- that commit's real, unmodified asicontrol.py
+  asicontrol.py.patched  -- the same file with a new `self.serial_lock`
+                             (threading.Lock) added to StageControlASI.__init__,
+                             and _send_command()'s write/readline wrapped in it
+  asicontrol.py.diff     -- apply the same way:
+                               git apply mesoSPIM_Core_patch_reference/asicontrol.py.diff
+                             Also verified with `git apply --check` against the
+                             same commit -- applies cleanly.
+
+If your checkout is a different commit and a diff doesn't apply
+cleanly (git will say so, and won't touch your file), the edits
+are small enough to make by hand -- diff each file's .orig against
+its .patched to see exactly what changed, or see
+PATCHNOTES_ASI_TIGER.md's changelog entries for the same diffs
+inline with explanation.
+
+UPDATE: mesoSPIM_Core.py.patched/.diff now ALSO wrap live()'s loop with
+waveformer.begin_live() / end_live() (try/finally, hasattr-guarded) so the ASI Tiger
+backend keeps ETL/galvo running between live frames. Re-apply the diff; verified with
+`git apply --check` against the commit above.
+
+UPDATE 2: Core patch now also adds sig_polling_stage_position_set_interval + helpers
+(_stage_polling_pause/_pause_for_live/_resume): optional slow stage-position polling during
+live/snap/acquisition for the ASI Tiger backend (asi_dac_parameters['stage_poll_interval_ms_during_run']),
+and snap()/live() now pause polling ONLY for ASI_Tiger (NI/Demo keep stock behaviour).
+Re-apply the diff; verified with `git apply --check` against the commit above.

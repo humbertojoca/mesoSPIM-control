@@ -123,6 +123,19 @@ additive (an `elif` branch):
 +    self.waveformer = mesoSPIM_ASITigerWaveFormGenerator(self)
 ```
 
+**VERIFIED against the real mesoSPIM-control source** (this diff was
+written against a real, current clone of
+github.com/mesoSPIM/mesoSPIM-control, commit `98d74d35bdc6dbc9523cf9ddbed59f262b629a66`
+(2026-07-22) -- fetched directly for the "full integration" push, not
+guessed): `git apply --check` on that exact checkout confirms this
+diff applies cleanly. A ready-to-use `mesoSPIM_Core.py.diff` (proper
+`a/`/`b/` paths, apply from the repo root with `git apply
+mesoSPIM_Core.py.diff`) and a fully patched reference copy of the
+whole file are included in the delivered package
+(`mesoSPIM_Core_patch_reference/`) -- if your checkout is a different
+commit and the diff doesn't apply cleanly, the two edits are small
+enough to make by hand from the reference copy.
+
 ### `requirements-conda-mamba.txt` / `requirements-clean-python.txt`
 
 Add `pyserial` if not already present (mesoSPIM's own ASI stage driver,
@@ -3450,10 +3463,1151 @@ errors") -- the exposure-derived ETL period (0.0ms margin) runs
 cleanly with the galvo + per-arm ETL bench test, no regressions from
 the margin default change.
 
+## Full mesoSPIM-control integration push: cloned the real repo, found and fixed a serious call-frequency bug, fixed an incomplete config example
+
+User asked to move on to full mesoSPIM-control integration. Previously
+every claim about mesoSPIM's real call pattern was based on the file
+being fetched piecemeal or user-pasted (mesoSPIM_Core.py,
+mesoSPIM_Stages.py, asicontrol.py, utils/acquisitions.py,
+mesoSPIM_Camera.py) as specific questions came up -- correct as far as
+it went, but incomplete: `snap()`/`live()` (the single-snap and
+live-preview call paths) had never actually been read. For this push,
+cloned the real repo directly (`github.com/mesoSPIM/mesoSPIM-control`,
+commit `98d74d35bdc6dbc9523cf9ddbed59f262b629a66`) instead of
+continuing to fetch piecemeal, so the WHOLE call surface could be
+checked at once before the user spends real-hardware time on it.
+
+**Found a serious bug: `close_tasks()` was nulling all of this
+backend's persistent device handles on EVERY call, but `close_tasks()`
+is called far more often than assumed.** Confirmed directly from the
+real `mesoSPIM_Core.py`:
+- `snap_image()` (used by BOTH `snap()` and `live()`'s per-frame loop)
+  calls ALL SIX overridden methods -- `create_tasks()` through
+  `close_tasks()` -- EVERY SINGLE CALL. For `live()`, that's every
+  single preview frame.
+- `close_acquisition()` (-> `close_image_series()` -> `close_tasks()`)
+  is called ONCE PER ROW inside `run_acquisition_list()`'s `for acq in
+  acq_list:` loop -- NOT once at the end of a whole multi-row
+  acquisition list, as an earlier module docstring incorrectly
+  claimed (written before `snap()`/`live()` had been read, generalized
+  too far from just the per-frame-series path).
+
+This backend's `create_tasks()` was already written to be a no-op
+after the first call (`if self._tiger is not None: return`) --
+correct and deliberate, since the Tiger connection/PLC config/
+SingleAxisWaveform objects are meant to be set up ONCE, unlike NI's
+`create_tasks()`/`close_tasks()`, which legitimately rebuild finite
+`nidaqmx.Task()` buffers every call by design (confirmed from the real
+`mesoSPIM_WaveFormGenerator.py` base class too -- NI's per-call
+rebuild is genuinely how that hardware model works, not a pattern this
+project was supposed to be copying literally). But `close_tasks()`
+nulled `self._tiger`/`self._plc`/`self._dac`/all four axis handles
+unconditionally at the end of every call -- which, combined with the
+real call frequency above, meant: every live-preview frame, and every
+row of a multi-row acquisition, would have triggered a FULL re-setup
+(PLC `clear_state()`, DAC channel re-add, ETL/galvo re-instantiate +
+`stop_and_zero()`, `enable_backplane_trigger_mode()` re-sent, camera-
+trigger cell + Expose-Out wiring reconfigured from scratch) immediately
+followed by tearing it all back down again. For `live()` specifically,
+the free-running galvo would never have actually run continuously --
+it would have been started, then immediately `stop_and_zero()`'d,
+every single frame, instead of scanning smoothly for the whole
+preview. Caught by reading the real source before ever reaching real
+hardware -- no real-hardware evidence of the broken behavior exists to
+report, only the source-level confirmation of why it would have
+happened, which is the entire point of doing this check now rather
+than after the user burns a live-preview session on it.
+
+**Fix**: `close_tasks()` now does only the "return to safe idle" part
+(stop/zero both ETL axes and both galvo axes, `safe_all_outputs()` on
+the PLC, zero the DAC) and no longer nulls/disconnects anything.
+`create_tasks()`'s existing no-op guard is what now actually delivers
+"set up once, for the life of this backend instance" regardless of
+which call path (per-frame series, single snap, or live preview) is
+driving it. Checked whether there's a genuine "application really is
+closing" hook this could instead key off of -- there isn't one exposed
+to the waveformer anywhere in the real `mesoSPIM_Core.py` -- so an
+owned serial connection is now left open for the life of the process,
+same as mesoSPIM's own `StageControlASI` already does with its
+connection (no explicit final close call either) -- an existing
+convention in this codebase, not a new risk. The OS reclaims the port
+on process exit regardless.
+
+Both the module-level ARCHITECTURE NOTE and `create_tasks()`'s/
+`close_tasks()`'s own docstrings rewritten to state the corrected,
+now-source-verified call pattern plainly, instead of the
+per-frame-series-only picture from before.
+
+**Mock-verified the fix directly** (synthetic stand-in base class +
+`FakeSerial`, same pattern as this project's other mock tests):
+simulated `snap_image()`'s exact real call sequence (create -> write ->
+start -> run -> stop -> close) repeated multiple times in a row, as
+`live()`'s loop does per frame. With the fix: `self._tiger`/`self._plc`
+identity is the SAME object across every cycle, and a marker command
+that only `create_tasks()`'s one-time PLC cell setup ever sends
+(`CCB X=0 Y=0 Z=0`, from `configure_cell()`) appears exactly ONCE
+across 4 full cycles. For contrast, patched a scratch copy back to the
+OLD null-everything behavior and re-ran the same sequence: the same
+marker command appeared once PER cycle (3 of 3) -- confirming both
+that the bug was real and that the fix eliminates it.
+
+**Fixed a second, smaller gap found from the same real-source read:
+`config_asi_tiger_example.py`'s commented-out `asi_parameters` block
+was incomplete.** It had `COMport`/`baudrate`/`ttl_motion_enabled`
+right, but was missing `stage_assignment` and `encoder_conversion` --
+both read unconditionally by the real `StageControlASI.__init__()`
+(confirmed directly from `devices/stages/asi/asicontrol.py`) -- and
+`ttl_cards`, read unconditionally by `mesoSPIM_ASI_Stages.__init__()`
+(confirmed from the real `mesoSPIM_Stages.py`). A config built from the
+old example block would have failed immediately on startup with a
+`KeyError`, before ever reaching this backend's own code. Fixed with
+the real required keys, `stage_type` confirmed as the exact string
+`'TigerASI'` (not `'ASI'`), and `ttl_cards: None` (confirmed safe --
+only read inside `enable_ttl_mode()`, which is itself gated by
+`ttl_motion_enabled_during_acq`, which this design always sets False).
+
+**Also confirmed, directly from the real source, two things that were
+previously asserted from inference rather than verification:**
+- The COM-port connection-sharing mechanism this backend's
+  `_get_shared_tiger_connection()` relies on
+  (`self.parent.serial_worker.stage.asi_stages.asi_connection`) is the
+  real attribute path -- confirmed against `mesoSPIM_Core.py` (`self.
+  serial_worker = mesoSPIM_Serial(self)`) and `mesoSPIM_Stages.py`
+  (`mesoSPIM_ASI_Stages.__init__`: `self.asi_stages =
+  StageControlASI(...)`), not assumed.
+- No threading race is possible on that shared serial connection during
+  an acquisition: `mesoSPIM_Core.py` keeps `serial_worker` on the Core
+  thread (the comment there says so explicitly -- never moved to a
+  QThread) and calls `sig_polling_stage_position_stop.emit()` before
+  `prepare_acquisition()`, resumed only after the whole acquisition
+  list finishes -- so no background position-poll traffic competes for
+  the shared connection during a run. The only other traffic on it
+  (per-frame `move_relative()` Z/F stepping, since `ttl_motion_enabled`
+  is False for this design) is issued by the SAME thread, sequentially,
+  interleaved with this backend's own commands by `run_acquisition()`'s
+  loop itself -- never concurrently.
+
+Delivered this session: the two adapter fixes (`close_tasks()`
+call-frequency fix), the fixed `config_asi_tiger_example.py`
+(`asi_parameters` block completed, connection-sharing/threading-safety
+comment rewritten with the real confirmation), and the
+`mesoSPIM_Core.py` patch materials
+(`mesoSPIM_Core_patch_reference/mesoSPIM_Core.py.diff` +
+`mesoSPIM_Core.py.patched`, both checked against the real commit
+above).
+
+Not yet run on real hardware -- the `close_tasks()` fix specifically
+needs confirming with an actual `live()` preview session (the exact
+path it was written for) once the user has applied the
+`mesoSPIM_Core.py` patch and built a real config file.
+
+## Real lasers arrived (Oxxius L4Cc, 638/561/488/405): found the laser DAC range was never actually set on real hardware
+
+User received real Oxxius L4Cc lasers and ran
+`asi_tiger_laser_intensity_test.py`: commanding up to ~4V (near
+range_code=1's 4.096V ceiling) only reached ~70mW of these lasers'
+rated 100mW.
+
+**Confirmed directly from Oxxius's own real L4Cc/L6Cc user manual**
+(fetched, not assumed --
+https://www.oxxius.com/wp-content/uploads/2023/05/UserManual_LnCc_v177aa2.pdf):
+"The analog modulation functions allow the user to deliver an output
+power proportionally to the input voltage: 0V for a nil power, 5V for
+the maximal power" -- linear 0-5V = 0-100%. 4V is 80% of that range;
+~70% measured is in the right ballpark (some calibration slop) but
+genuinely short of 100%, because the DAC has never been able to reach
+5V at all under range_code=1's 4.096V ceiling.
+
+**Root cause, found by re-reading `asi_tiger/dac.py`'s own docstrings
+closely -- a pre-existing gap in this project, not a new regression:**
+`ASITigerDAC.add_channel(range_code=...)`, used everywhere in this
+project so far (including `asi_tiger_laser_intensity_test.py` and
+`config_asi_tiger_example.py`'s `laser_dac_channels`), only sets a
+CLIENT-SIDE label used for `set_voltage()`'s own safety-limit math --
+it does **not** touch the real hardware range at all. The actual
+electrical output range is a CARD-WIDE hardware setting changed only
+by the `PR` command (`ASITigerDAC.set_range()`), and per ASI's own
+`command:pr` docs (quoted directly in `set_range()`'s own docstring,
+already written months ago but never acted on): "Controller reset or
+restart is needed for setting to take effect." `set_range()`/`PR` had
+never actually been called anywhere in this project before now --
+`query_range()`'s own docstring already said as much ("every
+channel's range_code ... is a software-side label only, never
+confirmed against the real hardware"). The ~4.096V ceiling the user
+hit is consistent with the card's real, never-touched hardware range
+simply happening to already be at or near code 1.
+
+**Fix -- a one-time hardware commissioning procedure, not a code
+change to the adapter itself** (the adapter correctly never resets the
+whole Tiger controller mid-session on its own; that's disruptive and
+unsafe to do automatically, and the range is meant to be set once,
+ahead of time):
+- New `tools/asi_tiger_laser_dac_range_setup.py`: queries the REAL,
+  currently-active range via `PR <axis>?` for every laser-card axis
+  (read-only, safe); with `--set-range`, sends `PR <axis>=2` (0-10.24V,
+  comfortable headroom above the needed 5V) for every axis and then
+  explicitly STOPS, telling the user to power-cycle/reset the Tiger
+  controller (per ASI's docs, PR needs that to take effect, and
+  nothing in this project has a confirmed software reset command); on
+  a **separate** run with `--verify` (deliberately refuses to combine
+  `--set-range` and `--verify` in one run), re-queries `PR <axis>?` to
+  confirm the new range is genuinely active before doing a real
+  voltage sweep up to 5.5V, so the user can confirm against a real
+  power meter that 100% is reached at/near 5V, not before or needing
+  more.
+- `config_asi_tiger_example.py`: `laser_dac_channels`'s `range_code`
+  changed 1 -> 2, with a note that this is a label describing an
+  assumed-already-done hardware state, not something the config itself
+  changes -- pointing at the new setup script. Also added guidance
+  (previously entirely missing from this example) for
+  `cfg.startup['max_laser_voltage'] = 5` -- confirmed from the real
+  `mesoSPIM_WaveFormGenerator.py`/`mesoSPIM_Core.py` that this key
+  lives in a DIFFERENT top-level config dict (`cfg.startup`, not
+  `asi_dac_parameters`) and is read by the base class before this
+  backend's own `config_check()` even runs; 5V matches the Oxxius
+  spec exactly (real `demo_config.py` uses the same pattern for other
+  laser brands, e.g. "5V for Toptica MLEs").
+- `asi_tiger_laser_intensity_test.py`: defaults changed to match
+  (`--range-code` 1 -> 2, `--max-volts` 4.0 -> 5.5), docstring/help
+  updated with the real finding and a pointer to the new setup script
+  as a prerequisite.
+
+**Mock-verified** with a new stateful fake serial that tracks `PR`
+state per (card, axis) across simulated "power cycles" (a module-level
+dict, since the real controller's EEPROM persistence can't be
+faked within one process the same way a stateless fake would): the
+full query -> set-range -> (simulated power cycle) -> verify -> sweep
+sequence runs correctly end to end, including the 5.5V sweep
+succeeding under the new range_code=2 safety limit; separately
+confirmed both refusal paths work (`--verify` before any real range
+change correctly refuses to sweep; `--set-range` and `--verify`
+together in one run are refused outright, since the range genuinely
+isn't active until a real power cycle happens in between).
+
+**Not yet run on real hardware.** This needs the user to actually run
+`asi_tiger_laser_dac_range_setup.py --set-range`, physically power-
+cycle the Tiger controller, then run it again with `--verify` and
+watch a real power meter to confirm 100% is reached at 5V -- only then
+should `config_asi_tiger_example.py`'s `range_code: 2` and
+`max_laser_voltage: 5` guidance be trusted as matching real hardware.
+
+## Real-hardware report: `--set-range` alone did not survive a power cycle -- `PR` needs an explicit `SS Z` save too
+
+User tried `asi_tiger_laser_dac_range_setup.py --set-range` on real
+hardware (card 35): it did not work as documented. The user set the
+range manually and separately sent `SS Z` (card-addressed -- `35SS Z`)
+to save it, and confirmed: **the range now stays at mode 2 after a
+power cycle.**
+
+This refines (not contradicts) what `set_range()`'s docstring already
+said from ASI's own `command:pr` docs ("controller reset or restart is
+needed for setting to take effect") -- that described activating PR's
+new range, but said nothing about SURVIVING A REAL POWER CYCLE
+specifically, and this project had never actually tested that
+distinction against real hardware until now. The user's finding: `PR`
+alone was not enough for the new range to survive a real power-down;
+an explicit `SS Z` (save-to-flash, card-addressed) was required.
+
+Tried to independently confirm the exact general semantics of `SS Z`
+against ASI's own documentation before writing this up (fetching
+`docs.asiimaging.com`'s SS/PR command pages, the TG-1000 manual PDF,
+and a plain web search) -- every attempt failed (provenance-approval
+timeouts, a 429 rate limit), not a lookup that came back empty. So
+this fix is written up as **real-hardware-confirmed by the user
+only**, not doc-confirmed -- flagged explicitly in the code so a
+future reader doesn't mistake it for an ASI-documented guarantee.
+
+**Fix:**
+- New `ASITigerDAC.save_settings(card_addr)` in `asi_tiger/dac.py`:
+  sends `SS Z` (card-addressed), with a docstring stating plainly that
+  this is confirmed on real hardware only, that `Z` is the one value
+  this project has actually tested (not assumed to be the only valid
+  one or necessarily "save everything" in general), and that it must
+  be called once per `card_addr` AFTER `set_range()`, separately (not
+  folded silently into `set_range()` itself, since committing
+  persistent hardware state silently as a side effect of a
+  differently-named method is exactly the kind of surprise this
+  project tries to avoid).
+- `set_range()`'s own docstring updated with a pointer to this real
+  finding and to `save_settings()`.
+- `asi_tiger_laser_dac_range_setup.py`'s `--set-range` step now calls
+  `dac.save_settings(args.card_addr)` right after sending `PR` for
+  every axis, and both its module docstring and its runtime messages
+  (`Sent SS Z (card N) to commit the new range to flash...`) say so
+  plainly, instead of the earlier (incomplete) "PR + power-cycle is
+  enough" framing.
+
+**Mock-verified**: `save_settings(35)` sends the exact wire command
+`'35SS Z'` -- checked byte-for-byte against the user's own command
+notation, not just "a command containing SS". Re-ran the full
+`--set-range` mock scenario from the previous entry; it now sends `PR`
+for every axis followed by exactly one `SS Z` for the card, with
+updated messaging, and still correctly refuses to combine
+`--set-range`/`--verify` in one run or to sweep in `--verify` before a
+real range change is confirmed.
+
+Not yet re-run on real hardware with this exact script version --
+the user's confirmation so far is of their own manual `PR` + `35SS Z`
+sequence, not of this updated script. Worth a real run to confirm the
+script's automated version behaves identically to what the user did
+by hand.
+
+## New: ASITiger_LaserEnabler -- `cfg.laser = 'ASI_Tiger'` was a real gap
+
+Resuming the mesoSPIM-control integration push, a question about the
+real `config.py` ("should the laser parameter be ASI?") surfaced a
+genuine gap: `cfg.laser` is a config field SEPARATE from
+`cfg.waveformgeneration` -- confirmed directly from `mesoSPIM_Core.py`
+-- and it picks `self.laserenabler` independently of `self.waveformer`.
+Before this fix, only `'NI'`/`'cDAQ'` (-> `mesoSPIM_LaserEnabler`, real
+NI-DAQmx DO lines) or a string containing `'demo'` (->
+`Demo_LaserEnabler`, no-op) were recognized. Setting `cfg.laser =
+'ASI_Tiger'` without this fix would leave `self.laserenabler` never
+assigned -- a guaranteed `AttributeError` on the very first
+`self.laserenabler.enable(...)` call, and that call happens in
+`snap_image()`, `snap_image_in_series()`, `live()`, and
+`run_acquisition()` -- confirmed directly from `mesoSPIM_Core.py`, not
+assumed, every single one of those call sites was checked.
+
+The device-layer mechanism this needed already existed and was
+already real-hardware-confirmed, just not wired into Core: this
+project's own `tools/asi_tiger_laser_enable_test.py` had already
+exercised `row_setup.configure_laser_enable_lines()` -- one
+independent, directly-toggleable TTL enable line per laser on PLC
+BNCs 5-8 (cells 12-15) -- against real hardware (see the "New: laser
+command bench tests" entry above: "every row-level setup function...
+has now been checked on real hardware"). What was missing was purely
+the Core-integration layer connecting that to `cfg.laser`.
+
+**Fix:**
+- New `mesoSPIM/src/devices/lasers/ASITiger_LaserEnabler.py` --
+  matches `mesoSPIM_LaserEnabler`'s public interface exactly
+  (`enable(laser)`, `disable_all()`, `state()`), so it's a true
+  drop-in; Core.py's existing call sites need no changes. Wraps
+  `row_setup.configure_laser_enable_lines()`, built lazily on first
+  real use rather than at `__init__` (see next point).
+- **A real ordering hazard, found and fixed before it could bite**:
+  `self.laserenabler` is constructed in `Core.__init__`, before any
+  image is ever taken -- at that point
+  `mesoSPIM_ASITigerWaveFormGenerator.create_tasks()` hasn't run yet,
+  so its `_plc` (PLCCard instance) this class needs is still `None`.
+  Checked all four `enable()` call sites directly: three are always
+  preceded by a `create_tasks()` call earlier in the same chain
+  (`snap_image()` calls it directly; `prepare_acquisition()` ->
+  `prepare_image_series()` runs it before `run_acquisition()`), but
+  `live()` is the exception -- it calls `self.laserenabler.enable(laser)`
+  *before* entering the loop that calls `snap_image()` (which is what
+  would normally trigger `create_tasks()`). So a bare first-ever
+  `live()` click, before any prior `snap()` in that session, would hit
+  `_plc is None`. Fixed in `ASITiger_LaserEnabler._ensure_lines()`: if
+  `_plc` isn't ready yet, it calls `self.parent.waveformer.create_tasks()`
+  itself first -- safe because `create_tasks()` is explicitly
+  documented as idempotent/safe to call repeatedly (its own docstring,
+  from the earlier call-frequency fix), so forcing it a few lines
+  earlier than it would have run anyway changes nothing else.
+- `mesoSPIM_Core_patch_reference/`'s `.orig`/`.patched`/`.diff`
+  regenerated: now carries TWO additions (the pre-existing
+  `waveformgeneration` elif branch, plus this new `laser` elif branch
+  and its import), re-verified with `git apply --check` against the
+  same real commit (`98d74d35bdc6dbc9523cf9ddbed59f262b629a66`) --
+  still applies cleanly.
+- `config_asi_tiger_example.py`: added `laser = 'ASI_Tiger'` right next
+  to `waveformgeneration = 'ASI_Tiger'` with a comment explaining why
+  both are needed, plus optional `plc_laser_bncs`/
+  `plc_laser_toggle_cells` keys (defaulting to `(5,6,7,8)`/
+  `(12,13,14,15)`, this rack's existing convention) documented next to
+  `laser_dac_channels`.
+
+**Mock-verified** (synthetic package + `FakeSerial`, mirroring the
+existing `mesoSPIM_ASITigerWaveFormGenerator` test harness): confirmed
+(1) `enable()` called *before* any `create_tasks()` call (replicating
+`live()`'s exact ordering) does not crash and correctly forces setup
+first; (2) the one-time PLC cell/BNC configuration (`CCB` IO-config
+commands) runs exactly once across repeated `enable()`/`disable_all()`
+cycles, not once per call; (3) the laser-index mapping matches
+`sorted(laserdict.keys())`, the same convention used elsewhere in
+mesoSPIM; (4) an unknown laser name raises `ValueError`, matching
+`mesoSPIM_LaserEnabler`'s own exact behavior; (5) the ordinary case
+(`create_tasks()` already run first) still works unchanged. Inspected
+the raw sent-command sequences directly rather than trusting pass/fail
+alone -- confirmed the right toggle cell (matching each laser's sorted
+index) is the only one left high after each `enable()` call.
+
+**Not yet real-hardware-confirmed** as an integrated whole (the
+underlying `configure_laser_enable_lines()` mechanism is
+real-hardware-confirmed on its own, per the bench test above, but this
+new adapter class gluing it to `cfg.laser` has only been mock-tested).
+Confirm on real hardware -- scope on PLC BNC5-8, or real laser drivers
+if wired -- before trusting it for an actual acquisition.
+
+## Real-hardware report: first live() attempt crashed -- `self.state.get()` doesn't exist
+
+**User report, first real attempt at `live()` after applying both
+Core.py elif branches**: `AttributeError: 'mesoSPIM_StateSingleton'
+object has no attribute 'get'`, raised inside
+`write_waveforms_to_tasks()` at `self.state.get("shutterconfig",
+"Left")`.
+
+Root cause, confirmed directly from the real `mesoSPIM_State.py`:
+`mesoSPIM_StateSingleton` is NOT a dict and does not subclass one --
+it only implements `__getitem__`/`__setitem__`/`__len__` (mutex-locked
+custom methods), deliberately, for thread-safe access. No `.get()`
+exists anywhere on it. This file had **11 separate
+`self.state.get(key, default)` calls** -- every single one of them
+would have crashed the same way, the first time each was reached
+(`shutterconfig`, `laser`, `intensity`, `camera_exposure_time` x2, and
+four each of `etl_*`/`galvo_*` amplitude/offset/frequency/duty_cycle).
+
+**Why this wasn't caught sooner, despite extensive mock testing**: every
+mock test in this project's harness used a `FakeState(dict)` --
+subclassing `dict` for convenience, since it behaves like the real
+state almost everywhere (`state['key']`, `state['key'] = value`). But
+`dict` ALSO provides `.get()`, which the real `mesoSPIM_StateSingleton`
+does not -- so every mock run silently exercised a DIFFERENT, more
+permissive interface than real hardware actually has. This is exactly
+the kind of gap the project's own "verify against real hardware, don't
+assume from mocks alone" rule exists to catch, and it did -- just on
+first real use rather than in testing.
+
+**Fix:**
+- New `_state_get(state, key, default=None)` helper added to
+  `mesoSPIM_ASITigerWaveFormGenerator.py`: tries `state[key]`, catches
+  `KeyError`, returns `default` -- works identically against the real
+  singleton and a plain dict, without relying on `.get()` existing on
+  either. All 11 call sites now route through it.
+- In practice every key this file reads is always pre-populated by
+  `mesoSPIM_StateSingleton.__init__()`'s own hardcoded defaults (confirmed
+  directly: `shutterconfig`, `laser`, `intensity`, `camera_exposure_time`,
+  all four `etl_*`/`galvo_*` groups are all in its literal `_state_dict`),
+  so the `default` argument is realistically never hit on real hardware
+  -- it's a defensive fallback, not load-bearing.
+- **Mock harness itself fixed too**, not just the production code: added
+  `RealStateStub` (no dict inheritance, only `__getitem__`/`__setitem__`/
+  `__len__`/`__contains__`, matching the real class's actual interface)
+  and re-ran every existing scenario (`snap_image()`-style cycles,
+  `live()`'s enable-before-create_tasks ordering hazard) against it
+  instead of the old dict-based fake. All pass with the fix; re-running
+  them against the OLD code (before `_state_get()`) reproduces the
+  exact real-hardware crash, confirming the mock gap is now closed, not
+  just papered over.
+
+**Lesson applied going forward**: the dict-based `FakeState` is not
+representative of `mesoSPIM_StateSingleton`'s real interface and
+should not be used for new mock tests of this file -- `RealStateStub`
+(or an equivalent subscript-only stand-in) is the correct one from now
+on.
+
+## Real-hardware report: intermittent garbled serial reply during live() -- shared connection had no cross-driver lock
+
+**User report, next real `live()` attempt after the state-interface
+fix**: `ValueError: could not convert string to float:
+'\x00\x00\x00\x000\x00\x00'`, raised inside
+`PLCCard.read_bnc_inputs()` parsing the reply to `RDADC X?`. Mostly
+null bytes with one surviving `'0'` character -- not a malformed
+single reply, but the signature of two unsynchronized readers/writers
+colliding on one half-duplex serial line.
+
+**Root cause, confirmed directly from the real source on both sides**:
+an ASI Tiger rack is one physical device behind ONE serial port,
+hosting many logical cards (stage, DAC, PLC). `_get_shared_tiger_connection()`
+(added earlier in this project specifically to avoid opening a second,
+conflicting `serial.Serial` on that same port) reuses mesoSPIM's own
+ASI stage driver's connection object directly via
+`TigerController.from_open_serial()`. That part was always correct.
+What was missing: `StageControlASI._send_command()` (asicontrol.py,
+the REAL mesoSPIM-control file, not this project's) had **no lock at
+all** around its own `write()`/`readline()` calls, and
+`TigerController`'s own `self._lock` (created fresh in
+`from_open_serial()`) only serialized OUR commands against each
+other -- never against the stage driver's. mesoSPIM runs stage
+position polling on a GUI-thread timer continuously (confirmed from
+mesoSPIM_Core.py's own comment: "Position polling runs in MainWindow
+GUI thread, not in Core thread!"); `prepare_acquisition()` explicitly
+stops that polling before a multi-row acquisition for exactly this
+reason, but `live()` never does. So during `live()`, the position
+poller and our `RDADC X?` reads race on the same wire, occasionally
+interleaving -- intermittent, not every call, matching what was
+reported.
+
+Asked the user first whether their Tiger exposes one COM port or two
+(two would have allowed a much simpler fix -- just not sharing the
+connection at all); confirmed one port, so the real fix is a shared
+lock across both drivers, not a workaround.
+
+**Fix:**
+- `TigerController.from_open_serial()` (`asi_tiger/controller.py`) now
+  takes an optional `lock=` parameter; if given, it REPLACES the
+  instance's own private `self._lock` with that exact object, so this
+  controller's commands and whoever else holds that same lock are
+  truly mutually exclusive, not just self-consistent.
+- New `self.serial_lock = threading.Lock()` on `StageControlASI`
+  (`asicontrol.py`) -- a real mesoSPIM-control file, patched the same
+  way `mesoSPIM_Core.py` is (see `mesoSPIM_Core_patch_reference/
+  asicontrol.py.diff`, verified with `git apply --check` against the
+  same real commit) -- and `_send_command()`'s existing
+  write/readline/`_reset_buffers()` sequence now runs inside `with
+  self.serial_lock:`. Exposed as a public attribute specifically so
+  another driver sharing the connection can use the SAME lock object,
+  not just add its own separate one.
+- `_get_shared_tiger_connection()` now looks for `asi_stages.serial_lock`
+  and passes it through to `from_open_serial(ser, lock=...)`. If it's
+  missing (an unpatched/older `StageControlASI`), this does NOT crash
+  -- it falls back to the old private-lock behavior, but now logs a
+  loud `logger.error()` explaining exactly why that fallback is unsafe,
+  instead of silently reproducing the same race.
+
+**Mock-verified** (can't reproduce a real OS-level serial race in a
+mock, so this verifies the WIRING is correct, not the race itself):
+confirmed (1) when the stage driver exposes `serial_lock`, the
+resulting `TigerController._lock` IS that exact same object (identity
+check, not just "a lock") -- the actual thing that makes the two
+drivers mutually exclusive; (2) when `serial_lock` is absent, `create_tasks()`
+still completes without raising, falling back to a private lock, with
+the expected error logged; (3) the different-port case (no sharing at
+all) is unchanged. Re-ran every existing regression scenario
+(`snap_image()`-style cycles, the `live()` ordering-hazard case, the
+laser-enabler tests, all against the non-dict `RealStateStub`) against
+the updated `controller.py` -- all still pass.
+
+**Not yet re-tested on real hardware** -- this fix requires applying
+BOTH the updated files AND the new `asicontrol.py` patch to your real
+checkout. The intermittent nature of the original bug means a single
+clean `live()` run afterward is encouraging but not conclusive; a
+longer live-preview session (watching for the same `ValueError`
+recurring) is the real confirmation.
+
+**Follow-up real-hardware report**: the `asicontrol.py` patch hadn't
+actually reached the user's checkout yet (only the `.diff` had been
+sent, which needs `git apply` against a checkout that may not even be
+a git repo) -- confirmed by asking the user to grep their real file
+for `serial_lock` and finding it absent. Sent the complete patched
+file directly as a drop-in replacement instead of a diff, to remove
+the git step entirely for this one.
+
+## Real-hardware report: live() technically correct now, but unusably slow -- the lock fixed corruption, not contention
+
+**User report, after the `serial_lock` fix actually landed**: no more
+corrupted replies or permanent deadlock (confirmed via
+`faulthandler.dump_traceback_later()` dumps spaced 15s apart -- Python's
+`Ctrl+C`/SIGINT only interrupts the main/GUI thread, which turned out
+to be running fine the whole time, so it was the wrong tool; switched
+to `dump_traceback_later()`, which dumps every thread and doesn't rely
+on a signal Windows doesn't support for `faulthandler.register()`
+anyway). The dumps showed the Core thread actually progressing --
+different call sites across successive dumps (laser-enable PLC setup,
+`disable_all()`, the per-frame `RDADC` poll, finally winding down
+inside `live()` itself) -- genuinely moving, just extremely slowly:
+each individual serial round-trip was taking 15-30+ seconds instead of
+milliseconds.
+
+**Root cause**: the `serial_lock` fix made the two drivers safely take
+turns on the shared port, but did nothing to stop them from
+constantly CONTENDING for it. mesoSPIM's own stage position-polling
+timer keeps firing throughout `live()`/`snap()` (confirmed: `asicontrol.py`
+opens its connection with a 5-second native timeout). Every time our
+per-frame Tiger traffic and the GUI's position poll happened to land
+at the same time, whichever side lost the lock had to wait for the
+other to finish -- and if THAT side's command didn't get a timely
+reply (plausible if the Tiger controller's single serial front-end was
+still mid-reply to the other driver's command), it could eat its own
+full multi-second timeout before releasing the lock. These delays
+stack: not broken, just serialized at a granularity far too coarse for
+real-time preview.
+
+mesoSPIM already has the right tool for this, just never applied to
+`live()`/`snap()`: `prepare_acquisition()` already emits
+`sig_polling_stage_position_stop` before a multi-row acquisition
+(confirmed directly from `mesoSPIM_Core.py`), specifically to avoid
+exactly this class of contention -- `live()` and `snap()` just never
+got the same treatment, presumably because the NI backend's `self.waveformer`
+never shares a serial port with the stage at all, so the contention
+this prevents never existed for that backend.
+
+**Fix** (third addition to the same `mesoSPIM_Core.py`, folded into
+the existing `mesoSPIM_Core_patch_reference/mesoSPIM_Core.py.{orig,patched,diff}`
+rather than a new file -- regenerated and re-verified with `git apply
+--check` against the same real commit, still applies cleanly):
+- `snap()`: emits `sig_polling_stage_position_stop` right after
+  `sig_prepare_live`, and `sig_polling_stage_position_start` right
+  after `close_shutters()` -- `snap()` previously had no
+  polling-pause of its own at all, since nothing else manages it for a
+  single one-shot snap.
+- `live()`: emits `sig_polling_stage_position_stop` once before the
+  per-frame loop starts, and `sig_polling_stage_position_start` once
+  after the loop exits (alongside `laserenabler.disable_all()`/
+  `close_shutters()`). `stop()` (the GUI's Stop button handler) ALSO
+  already emits the resume signal on its own -- both emits are
+  harmless/idempotent (restarting an already-running `QTimer` is a
+  no-op), so this is a defensive belt-and-suspenders resume that
+  covers any exit path, not just a user-initiated stop.
+- This is a **generic** mesoSPIM-control improvement, not conditioned
+  on `cfg.waveformgeneration` -- harmless for the NI backend (which
+  never contends for the stage's serial port in the first place) and
+  specifically fixes the real contention for the ASI Tiger backend's
+  shared-connection design.
+
+**Not yet re-tested on real hardware** -- needs the updated
+`mesoSPIM_Core.py` patch applied (same two files as before, `.diff` or
+`.patched`, now with this third change folded in).
+
+## Real-hardware report: live() now genuinely HUNG, not just slow -- a bounded fix for two pyserial behaviors that can block forever
+
+A third `hang_dump.txt` (`faulthandler.dump_traceback_later`, same
+technique as before) showed something different from the "slow but
+progressing" pattern the polling-pause fix (above) was built for: the
+Core thread got stuck on the EXACT SAME LINE across four consecutive
+15-second dumps (60+ seconds, no progress at all) -- first in
+`serialwin32.flush()`, then in `serialwin32.read()` -- both reached
+from `plc.py`'s `read_bnc_inputs()`, called from this backend's own
+`run_tasks()`.
+
+Two real, confirmed-from-source pyserial behaviors, both now fixed in
+`asi_tiger/controller.py`:
+
+1. **`flush()` has NO timeout, ever, by design.** Read directly from
+   the installed pyserial package (`serialwin32.py`):
+   ```python
+   def flush(self):
+       while self.out_waiting:
+           time.sleep(0.05)
+   ```
+   It does not honor `write_timeout` (that only bounds `write()`
+   itself) and there is no attribute that changes this. If
+   `out_waiting` ever gets stuck non-zero -- the OS-level output
+   buffer stops draining, for any reason -- real pyserial `flush()`
+   hangs forever, full stop, no exception to catch anywhere.
+   `TigerController.send_command()` called `self._ser.flush()`
+   directly after every write. Fixed: replaced with a new
+   `_flush_bounded()` that does the same wait but gives up after
+   `self._timeout` and raises `TimeoutError` instead of looping
+   forever.
+
+2. **`from_open_serial()` was wrapping the shared port without ever
+   touching its timeout settings**, so our side's `_timeout` (default
+   0.5s) was purely cosmetic -- the ACTUAL pyserial timeout/write_timeout
+   in effect were still whatever `StageControlASI` set when it first
+   opened the port. Confirmed directly from `asicontrol.py`:
+   ```python
+   self.asi_connection = serial.Serial(self.port, self.baudrate,
+       parity=serial.PARITY_NONE, timeout=5, xonxoff=False,
+       stopbits=serial.STOPBITS_ONE)
+   ```
+   `timeout=5` (not our 0.5s), and no `write_timeout` at all -- pyserial
+   defaults that to `None`, i.e. an unbounded, can-block-forever
+   `write()`. Fixed: `from_open_serial()` now explicitly sets
+   `obj._ser.timeout = obj._timeout` and
+   `obj._ser.write_timeout = obj._timeout` on the shared Serial
+   instance right after wrapping it. This DOES also shorten
+   `StageControlASI`'s own read timeout from 5s to 0.5s (same
+   instance, shared setting) -- a deliberate trade: a stage reply that
+   doesn't arrive within 0.5s on this hardware almost certainly isn't
+   coming at all, and a bounded, catchable `TimeoutError` beats a
+   connection wedged solid with no exception.
+
+**What was actually driving the port into this state in the first
+place:** this backend's `run_tasks()` polls `read_bnc_inputs()` (a
+full write+flush+read round-trip) every **1 millisecond** while
+waiting for the camera's Expose-Out BNC to flip, both at trigger-start
+and at exposure-end -- far more command traffic per frame than the NI
+backend this class mirrors ever generated, and, confirmed as the
+likely trigger for the stall, enough sustained flood to occasionally
+back up the shared port's output buffer. Fixed alongside the above:
+the poll interval is now 5ms by default (`camera_expose_poll_interval_s`
+in `asi_dac_parameters`, overridable), cutting round-trip volume 5x
+while still resolving well inside any real exposure time. A single
+timed-out/garbled poll (now a catchable `TimeoutError`/
+`SerialTimeoutException` instead of a hang) is logged and retried --
+only the phase's own overall timeout (`camera_expose_start_timeout_s`
+/ `..._end_timeout_margin_s`) decides when to actually give up, same
+as before.
+
+Net effect: a port that genuinely stalls now raises a normal,
+catchable exception within about half a second instead of hanging the
+whole Core thread (and the GUI with it) indefinitely with Stop
+unresponsive. This does not change `close_tasks()`'s own behavior on
+such an exception -- if `close_tasks()` needs hardening too (e.g. not
+aborting the rest of teardown if one step times out), that's the
+logical next thing to check if it comes up on real hardware.
+
+**No code changes to mesoSPIM-control proper this round** -- both
+fixes are entirely inside this project's own files
+(`asi_tiger/controller.py`, `mesoSPIM_ASITigerWaveFormGenerator.py`),
+nothing new to re-apply to `mesoSPIM_Core.py`/`asicontrol.py`.
+
+**Not yet confirmed on real hardware.**
+
+## Real-hardware report: "same, frozen" -- dump shows live() is PROGRESSING, just extremely slowly; added per-frame timing to find where the time goes
+
+The fourth `hang_dump.txt` (run with the bounded-flush/5 ms-poll build:
+line numbers match) is NOT a hang. Across ~15 dumps the Core thread is
+at a different place almost every time -- `_poll_expose_bit`, the
+`sleep` in the Expose-Out start-wait loop, `LaserEnabler.enable`,
+`disable_all`, `close_tasks -> stop_and_zero / safe_all_outputs /
+zero_all` -- always inside `live() -> snap_image()`. So the frame loop
+is running; each frame is just very slow, which looks frozen. Two
+suspects, neither confirmed yet:
+1. `run_tasks()` spends its full 2 s start-timeout every frame if the
+   camera's Expose-Out never reaches the PLC BNC (the dump catches it
+   in that wait loop about a third of the time).
+2. Every frame re-runs the full enable / disable_all / stop_and_zero /
+   safe_all_outputs / zero_all sequence -- on the order of 50-100
+   serial commands per frame, each a full round trip.
+
+Rather than guess, this build logs ONE WARNING line per frame:
+`ASI Tiger frame timing: <s since last frame> | <N> serial cmds, <s> on
+wire (avg/slowest + which command) | run_tasks <s>, Expose-Out high
+after: <ms | NEVER went high>`. Backed by `TigerController.take_stats()`
+(per-command wire time, excluding lock wait). Silence with
+`asi_dac_parameters['frame_timing_log'] = False`.
+
+**Why nothing appeared on the console:** mesoSPIM-control's
+`get_logger()` calls `logging.basicConfig(filename=...)`, so ALL
+`logger.*` output (these timing lines, and every `logger.error`/
+`logger.warning` in this backend) goes to `mesoSPIM/log/<timestamp>.log`,
+not the console. The timing line is now ALSO `print()`ed to the console.
+
+No behavior change otherwise. Mock-tested (all prior suites + the new
+line prints). **Needs real-hardware output of that line.**
+
+## Real-hardware log: frame timing shows ~4.65 s/frame, Expose-Out NEVER seen, and a real wiring bug -- close_tasks() severed the PLC wiring every frame
+
+The frame-timing log (mesoSPIM/log/<timestamp>.log) from a ~2-minute live() run:
+- every frame ~4.65 s = ~2.25 s waiting in run_tasks() for Expose-Out (it
+  "NEVER went high", all 30 frames, including frame 1) + ~225 serial
+  commands at ~16 ms each (~100 of them are the Expose-Out polls).
+- (Also: `_ensure_lines` took ~2.5 s the first time; the first frame is
+  295 commands / 6.4 s.)
+
+**Bug found by reading the command stream (mock, per-phase count): `close_tasks()`
+called `safe_all_outputs()` after EVERY frame.** That reconfigures every PLC
+output this backend set up -- camera-trigger BNC, the two ETL backplane
+trigger-in lines, the four laser-enable BNCs -- to push-pull driven by
+constant-low, i.e. it disconnects them. `create_tasks()` only wires them
+once and never re-runs, so from frame 2 on the camera-trigger cell was
+toggled but no longer reached the BNC, laser-enable cells no longer reached
+theirs, and the ETL never saw a trigger. (It also cost ~20-30 commands/frame.)
+The earlier docstring ("close_tasks() deliberately never undoes create_tasks()'s
+setup") was wrong about exactly this call.
+
+Fix: `close_tasks()` now only idles the camera-trigger cell (plus the existing
+ETL/galvo stop+zero and DAC zero); lasers are already switched off per frame by
+mesoSPIM's `laserenabler.disable_all()`. A new `safe_outputs()` does the full
+teardown (and forces `create_tasks()` to rewire next time) for a future exit
+hook. Steady-state mock frame: 67 -> 48 commands, and a regression test asserts
+steady-state frames send no `CCA Y=`/`CCA Z=` at all.
+
+**NOT explained by this fix:** Expose-Out never going high on frame 1 (wiring
+was intact then). Open candidates: (a) the 20 ms live exposure is shorter than
+our ~21 ms poll cadence (16 ms round trip + 5 ms sleep) so the pulse can be
+missed; (b) camera not receiving the trigger / Expose-Out not wired to the
+BNC. Quick discriminator, no rebuild: set live exposure to ~200 ms and see
+whether "never went high" disappears and the image updates.
+
+**Not yet confirmed on real hardware.**
+
+## Real-hardware report: live() WORKS (camera triggers, lasers fire) -- but "Left" selected, light on the right arm
+
+Log from a run after the wiring fix, exposure 200 ms: Expose-Out caught every
+frame (~100 ms after trigger -- i.e. the earlier "never went high" was the
+severed wiring, not poll cadence), ~2.0 s/frame, ~62 commands/frame, 0.49 fps.
+
+Left/Right: the code path is consistent -- shutterconfig "Left" -> `l` ETL +
+galvo axes and `lr_switch_left_v`; "Right" -> `r` axes and `lr_switch_right_v`
+(write_waveforms_to_tasks()). The polarity of the L/R switch voltage is
+hardware-specific and was never established in this project (docs only say 5 V
+is "the level expected"), so the most likely cause is `lr_switch_left_v` /
+`lr_switch_right_v` being the wrong way round for the real switch -> swap them in
+asi_dac_parameters. NOT yet confirmed: needs the user's Right-selected observation
+to tell "inverted" from "switch not changing".
+
+Defect fixed on the way: `close_tasks()` used `dac.zero_all()`, which also drove the
+L/R switch channel to 0 V after EVERY frame (Right: 5 V -> 0 V -> 5 V each frame,
+parked on the 0 V arm between frames). It now zeroes only the laser-intensity
+channels; the switch holds its side. Mock test added (test_lr_switch_hold).
+
+**Not yet confirmed on real hardware.**
+
+## Real-hardware report: "galvo resets every frame, is that necessary?" -- no; live() now keeps ETL/galvo running between frames (NEW CORE HOOK, not yet hardware-confirmed)
+
+The user, after confirming live() works with L/R voltages swapped in
+config, noticed the galvo restarts its sweep every frame. Log
+(daeb8603): 61 commands/frame, ~2.0 s/frame (0.48 fps) at 200 ms
+exposure. Not necessary: close_tasks() stopped and zeroed all four
+ETL/galvo axes after EVERY frame, and the next frame re-armed them.
+That design was inherited from "stop everything after each close",
+which is right for snap()/acquisition rows but pointless in live().
+
+Change (mesoSPIM_ASITigerWaveFormGenerator.py):
+- `begin_live()` / `end_live()` hooks. While live mode is on,
+  close_tasks() does NOT stop the axes, and write_waveforms_to_tasks()
+  skips re-arming when nothing it programs has changed (key = side,
+  ETL amplitude/offset/period, galvo amplitude/offset/frequency/duty).
+  Any change to those mid-live (e.g. dragging a slider, switching
+  Left/Right) reconfigures on the next frame. end_live() stops and
+  zeroes the axes.
+- Outside live (snap, acquisition rows) behavior is unchanged.
+- Core change #4 (mesoSPIM_Core.py live()): calls
+  `waveformer.begin_live()` before the loop and `end_live()` in a
+  `finally` (guarded by hasattr, so NI/Demo waveformers are
+  unaffected). The patch reference .patched/.diff were regenerated;
+  `git apply --check` passes on commit 98d74d35.
+  YOU MUST RE-APPLY THE UPDATED mesoSPIM_Core.py.diff. Without it the
+  backend still works exactly as before (hooks never called).
+
+Mock-verified (test_live_mode.py): steady-state live frame sends 8
+commands vs 30 in non-live (zero ETL/galvo-card commands); changing
+galvo amplitude, ETL offset or side triggers reconfigure; end_live()
+stops/zeroes the 4 axes; non-live frames return to stopping every
+frame; all earlier suites still pass. NOT yet confirmed on hardware:
+expected effect is fewer commands/frame in the timing log and a
+continuous galvo sweep. Remaining per-frame cost is mostly laser
+enable/disable cell toggles and DAC zero/set, still resent each frame
+(candidate for a later round).
+
+## Real-hardware log after live-mode change: 0.64 fps, 39 cmds/frame -- remaining cost is slow PLC pointer moves; added a PLC cell-state cache (not yet hardware-confirmed)
+
+Log d12c4103 (200 ms exposure): first frame 127 cmds (setup, one-off);
+steady frames 39-40 cmds, ~1.47 s on the wire (avg ~37 ms), 1.51 s/frame,
+camera-reported 0.64 fps (was 61 cmds, 2.0 s, 0.48 fps). The log cannot
+say whether the galvo sweep is now continuous -- that needs the user's
+eyes. Frames show "Expose-Out high after" ~90-105 ms every frame (wiring
+intact), run_tasks ~0.35 s.
+
+Where the time goes: the "slowest command" is always `36M E=<n>` at
+~103 ms -- the PLC pointer move that precedes every `CCA F=` write.
+Arithmetic from the log (an ESTIMATE, not a measurement): if k commands
+cost ~103 ms and the rest ~15 ms, 39 cmds in 1.47 s gives k ~ 10, i.e.
+~1 s of every frame is pointer moves. The mock shows 12 of them per
+frame: laser enable (re-clears 4 lines, sets 1), laser disable (clears 4),
+camera cell set/clear in run_tasks, and a redundant camera-cell clear in
+close_tasks.
+
+Change (devices/asi_tiger/plc.py): PLCCard keeps a cache of the last
+state it wrote to each cell and set_cell_state() skips a write that
+repeats it. Deliberately NOT cached: the pointer position (a skipped
+`M E=` would send a later `CCA F` to the wrong cell, possibly the wrong
+laser). The cache is cleared on any error, on configure_cell() of that
+cell, on reset_all_cells_and_io / clear_state / safe_all_outputs /
+reset_pulse_pass_through_counter, and by begin_live() (so the first frame
+of each live session re-establishes real states). Anything that changes
+a cell behind this object's back must call invalidate_state_cache().
+
+Mock (live steady state, laser + camera): 26 -> 10 commands/frame,
+`M E=` 12 -> 4. test_plc_cache.py replays commands against a model of
+the cell states: switching 488 -> 561 -> off leaves exactly the right
+lines on, redundant disable sends nothing, a failed write invalidates,
+configure_cell / begin_live invalidate. All earlier suites still pass.
+Expected on hardware: ~12 fewer pointer-move-bound commands per frame
+(~0.8 s) so roughly 0.7 s/frame at 200 ms exposure -- an estimate until
+a new log confirms it. Still resent each frame: laser DAC set/zero
+(`35M P=...`, 2 cmds) and 4 pointer moves.
+
+## HARDWARE-CONFIRMED: live-mode hooks + PLC cell-state cache (log a2cae9e8)
+
+User report: galvo runs fine (continuous), laser blanking as expected,
+laser line and intensity can be changed during live. Log: steady frames
+23 serial cmds, ~0.57 s on wire (avg ~25 ms), 0.60-0.64 s/frame,
+camera-reported 1.54 fps at 200 ms exposure (was 0.48 -> 0.64 -> 1.54
+across the live-mode and cache changes). run_tasks ~0.35 s of each frame
+is the exposure plus ~100 ms until Expose-Out goes high, so ~0.25 s/frame
+is what is left to trim (remaining pointer moves, laser DAC set/zero,
+the poll reads in run_tasks) -- not attempted. No errors in the log.
+
+## Live-mode round 2: hold the laser DAC between frames + PLC pointer tracking (two config switches; mock-tested, NOT yet hardware-confirmed)
+
+Asked by the user: is it necessary to zero the laser DAC every frame, and
+what else can be trimmed? Answers: (1) No -- close_tasks() zeroed every
+laser DAC channel and write_waveforms_to_tasks() set it again each frame,
+an NI-era habit; the PLC enable line already blanks. (2) Of the 4 slow
+`M E=` pointer moves per frame, 2 repeat the position the card already
+holds. (3) Logging costs ~nothing: the timing stats are in-process
+counters (no serial commands), the log line + print ~1 ms/frame; the one
+real risk is a Windows console blocking print() after a click inside it.
+Set frame_timing_log False when done troubleshooting.
+
+Both changes are LIVE ONLY (snap/acquisition unchanged) and independently
+switchable in asi_dac_parameters (both default True):
+- `live_hold_laser_dac`: during live the DAC is written only when the
+  voltage or laser line changes; a laser line you switch away from is
+  zeroed at once; end_live() zeroes all laser channels (L/R switch keeps
+  its side). Blanking then relies solely on the enable line -- CHECK for
+  stray light between frames on your hardware.
+- `live_track_plc_pointer`: PLCCard.track_pointer (default OFF, turned on
+  by begin_live and off by end_live) skips an `M <axis>=<addr>` that
+  repeats the last position this instance set. Safe in live because the
+  stage poller is paused and nothing else addresses the PLC card; every
+  skip sits between two of our own commands (the second camera-cell move,
+  and the laser enable that follows the previous frame's disable), never
+  across an RDADC poll, so it does not depend on RDADC leaving the
+  pointer alone (unverified). Dropped on any error, in
+  invalidate_state_cache(), and at begin_live/end_live.
+
+Mock (replay against a model of PLC pointer/cells and DAC axes): steady
+live frame 10 -> 6 commands, `M E=` 4 -> 2 (with this test config's two
+laser channels, flags off = 11). Verified: held level; one DAC write on
+intensity change; 488 -> 561 zeroes the old channel, sets the new one and
+turns exactly the right enable line on at trigger time; end_live zeroes
+all; flags independently switch each behavior; failed PLC/DAC writes
+drop the tracking; non-live frames unchanged; all earlier suites pass.
+Expected on hardware (ESTIMATE): ~0.2-0.25 s/frame saved, i.e. ~0.35-0.4
+s/frame at 200 ms exposure. Log line "ASI Tiger live mode: hold laser
+DAC ... track PLC pointer ..." at live start records which are active.
+
+## HARDWARE-CONFIRMED: live-mode round 2 (held laser DAC + PLC pointer tracking), log a541ed4e
+
+User report: everything in order -- laser blanking, laser switching and
+Left/Right switching all fine with both switches ON (log line confirms
+"hold laser DAC ... =True, track PLC pointer =True"). Log (590 frames):
+steady frames ~0.47-0.50 s, 23-24 serial cmds (mostly Expose-Out polls
+during the exposure), ~0.39 s on wire (avg ~17 ms), camera-reported
+2.03 fps (was 1.54 before this round; 0.48 at the start of the live-mode
+work). No errors beyond the known ttl_motion_enabled config message.
+Note: "Expose-Out high after" now reads ~200 ms vs ~100 ms in earlier
+logs; the exposure/trigger timing for this run was not compared, so no
+conclusion is drawn from it. run_tasks (~0.35 s) is now most of the frame.
+
+## Stage-position updates back during live/snap/acquisition (slow poll, opt-in) + a Core-patch correction (mock/Qt-tested, NOT yet hardware-confirmed)
+
+Asked by the user: put the stage-position updates back (slow is fine) so
+you can move stages during live/acquisition and still see correct
+positions. Cause of the gap: the Core patch paused mesoSPIM's 100 ms
+position poller for the whole of live()/snap() (and stock mesoSPIM
+already paused it for acquisitions), so GUI positions froze after any
+move. Position reads are one `W <axes>` command on the shared port; at 1
+s that is a few % of the link, not the contention that made live crawl
+earlier (that was 100 ms polling plus unbounded serial timeouts, both
+since fixed).
+
+New config key (asi_dac_parameters): `stage_poll_interval_ms_during_run`
+(example config: 1000). Set -> polling continues at that interval during
+live/snap/acquisition and returns to the normal 100 ms when idle.
+Absent/None/0 -> polling is paused exactly as before (confirmed-working
+default; existing configs are unaffected until you add the key).
+
+Core patch change (mesoSPIM_Core.py, now 5 changes): new signal
+`sig_polling_stage_position_set_interval(int)` -> pos_timer.setInterval
+(a queued cross-thread call; calling setInterval directly from the Core
+thread would be unsafe); helpers `_stage_polling_pause()`,
+`_stage_polling_pause_for_live()`, `_stage_polling_resume()` replace the
+raw start/stop emits. YOU MUST RE-APPLY the updated
+mesoSPIM_Core.py.diff (git apply --check passes on commit 98d74d35).
+
+CORRECTION to earlier notes: I described the snap()/live() polling pause
+as "harmless for every backend". It was not -- stock mesoSPIM never
+paused polling in live/snap, so NI/Demo users would have lost position
+updates there. The pause in snap()/live() now applies ONLY when
+cfg.waveformgeneration == 'ASI_Tiger'; the acquisition pause stays
+stock for everyone (or becomes the slow poll for ASI Tiger when the key
+is set).
+
+Verified: helper logic against a fake Core (NI = stock behaviour; ASI
+without the key = stop/start as before; ASI with 1000 = interval 1000 +
+start, then interval 100 + start on resume, no spurious interval emits;
+0/None/non-dict tolerated); real PyQt5 smoke test of the signal wiring
+from a non-Qt thread (100 ms: 5 ticks/0.55 s; 1000 ms: 2 ticks/2.2 s;
+restored: 5; stopped: 0). NOT tested: the full Core on real hardware.
+On hardware, check: positions update after moving a stage during live,
+and the frame time barely changes (log's "serial cmds"/"slowest").
+
+## ETL "not much action": amplitude convention was off by 2x (mesoSPIM amplitude is HALF peak-to-peak) -- fix is config-controlled (mock-tested, NOT yet hardware-confirmed)
+
+> **SUPERSEDED by the next entry** -- `etl_amplitude_scale` / `galvo_amplitude_scale` and the default 0-4.096 V ETL limits described below were removed at the user's request. The findings (items 1-3) stand.
+
+User report: "Not sure about ETL movement. Not seeing much action on ETLs."
+
+Findings (read from the code, not guessed):
+1. mesoSPIM's NI ETL waveform (utils/waveforms.tunable_lens_ramp) swings
+   offset-amplitude .. offset+amplitude, i.e. `amplitude` is HALF
+   peak-to-peak (galvo `sawtooth()` is `amplitude*wave+offset`, same
+   convention). The Tiger's SAA is the TOTAL peak-to-peak amplitude
+   (ASI command:saa: "sets the peak-to-peak amplitude of the pattern").
+   This backend passed mesoSPIM's number straight into SAA, so the ETL
+   (and galvo) swept HALF the NI-calibrated range -- e.g. 0.15 -> a
+   0.15 Vpp sweep where NI gave 0.30 Vpp.
+2. Ramp direction: NI Left (rise 90 / fall 5) ramps up, NI Right
+   (rise 5 / fall 85) ramps DOWN. This backend always used an upward
+   sawtooth. The delay/rise/fall shape is only approximated by the
+   card's fixed sawtooth.
+3. Not the cause: re-arming. arm_triggered() docs record hardware
+   confirmation that SAM=2 auto-rearms every Expose-Out edge, so
+   leaving the ETL armed between live frames is expected to be fine.
+
+Changes (asi_dac_parameters, all optional):
+- `etl_amplitude_scale` (default 2.0): SAA = amplitude x scale, ETL
+  centred on its offset. 1.0 restores the old half-swing behaviour.
+- `etl_follow_ramp_direction` (default False): when True, a side whose
+  ramp_falling_% > ramp_rising_% gets a NEGATIVE SAA (downward ramp).
+  Off by default because the geometry of a reversed ramp (centred on the
+  offset?) is documented but not yet bench-confirmed here.
+- `etl_min_volts`/`etl_max_volts` (default 0 / 4.096, this rack's ETL
+  card range): a swing outside them is REFUSED -- ETL left stopped and
+  zeroed, error logged -- instead of commanding an out-of-range SAA.
+- `galvo_amplitude_scale` (default 1.0 = unchanged; the user reported
+  the galvo fine). 2.0 would match NI-era scan width.
+- New INFO log on every ETL (re)arm: offset, mesoSPIM amplitude, scale,
+  Vpp, volt range, direction, period -- so a log shows what was sent.
+- tools/asi_tiger_singleaxis_test.py safety math now uses
+  abs(amplitude) (a negative amplitude only reverses direction).
+
+Mock-tested: default 0.15 -> SAA H=300 / SAO H=3528; scale 1.0 -> 150;
+Right side centred on its own offset; direction option gives SAA J=-300
+only on the falling-dominant side; out-of-range refused (no SAA/SAM=2,
+axis stopped+zeroed); galvo scale default unchanged and 2.0 doubles;
+in live, ramp% changes trigger reconfigure; all earlier suites pass.
+
+BENCH CHECK (scope on the ETL BNC, nothing connected is changed by this):
+  python tools/asi_tiger_singleaxis_test.py --port COM4 --card-addr 34 --axis H \
+      --pattern sawtooth --amplitude 0.3 --offset 3.528 --frequency 5 --duration 15 --max-volts 4.096
+expect a ramp between ~3.378 and ~3.678 V (0.30 Vpp). Repeat with
+`--amplitude -0.3` to see the reversed ramp direction and whether it
+stays centred on 3.528 V; only then set etl_follow_ramp_direction True.
+
+## ETL: amplitude scale removed (raw pass-through) and ETL voltage limits made opt-in; real range is now logged (mock-tested, NOT yet hardware-confirmed)
+
+User feedback: the ETL DAC output is fine (the check is on the
+microscope); the scale knob is unnecessary -- pass the raw number, each
+system gets tuned anyway -- and they were unsure about the ETL voltage
+range.
+
+Changes:
+- `etl_amplitude_scale` and `galvo_amplitude_scale` REMOVED. Amplitudes
+  go to SAA exactly as mesoSPIM's state holds them. Tuning note kept in
+  the code/config comments: SAA is TOTAL peak-to-peak (ASI command:saa),
+  NI-era mesoSPIM swung offset +/- amplitude, so the same number is a
+  half-size sweep here.
+- ETL voltage limits: my default 0-4.096 V was an ASSUMPTION taken from
+  the rack notes ("card 4, 0-4.096 V"). It may be wrong: range is a
+  per-card `PR` setting, and the L/R switch axis I on the same card 34
+  was raised to 0-10.24 V (`PR I=2` + reset, see that entry). So
+  `etl_min_volts`/`etl_max_volts` now default to NONE (no check); set
+  them only if you want a guard (a swing outside them is refused: ETL
+  left stopped and zeroed, error logged).
+- create_tasks() now does a one-time, read-only `PR <axis>?` for the two
+  ETL axes (card 34 H and J) and LOGS the raw reply (INFO: "ASI Tiger ETL
+  range: card 34 `PR H?` -> ..."). It is not parsed or enforced -- the
+  reply format has not been captured in this project yet. A failed query
+  only logs a warning. Use the logged value to choose limits if wanted.
+- Kept: `etl_follow_ramp_direction` (default False; bench-check a
+  negative amplitude first) and the per-(re)arm ETL log line (offset,
+  Vpp, sweep range, direction, period).
+
+Mock-tested: default raw 0.15 -> SAA H=150 / SAO H=3528; Right raw and
+centred on its own offset; direction option negative only on the
+falling-dominant side; no default limits (6.0 V offset is sent);
+opt-in limits refuse/allow correctly; galvo unchanged (SAA A=391);
+`34PR H?`/`34PR J?` sent once at setup and a failing query does not
+break setup; all earlier suites pass.
+
+## ETL voltage limit: it is the driver's analog input (0-5 V, 10-bit), not the DAC range -- example config now enables the guard
+
+User: the 0-4.096 V DAC range is fine; the real limit is the Optotune
+EL-E-4i driver, whose usable voltage "seems very low".
+
+Looked up (Lens Driver 4i manual, as hosted by Edmund Optics; the
+optotune.com product page has no analog-input numbers): "The analog
+voltage applied on hardware pin B ... must be between 0 V and 5 V."
+10-bit ADC (0-1023), "linearly mapped in firmware to the range defined
+by the lower and upper software limits"; no absolute-maximum or input
+impedance is given there. Check against the manual for the user's own
+driver revision.
+
+Consequences (arithmetic, not hardware-measured):
+- The DAC's 0-4.096 V never exceeds the driver's 5 V, so nothing here
+  can over-drive the input unless that card's range is raised (PR is
+  card-wide -- the L/R switch axis on the same card was raised to 10.24
+  V; see the startup `PR H?` log line). `etl_max_volts` is the guard.
+- Resolution: 5 V / 1023 ~ 4.9 mV per driver step, so a 0.15 Vpp sweep is
+  only ~30 steps (0.30 Vpp ~ 61). A coarse sweep is a plausible reason
+  for "not much action". The sweep's effect per volt is set by the
+  driver's software current limits, which can be widened in Optotune's
+  software instead of raising voltages.
+- Example config now ships the guard ON: etl_min_volts 0.0 /
+  etl_max_volts 4.096 (the user's DAC range). No code change.
+
+## "Not much ETL action": Expose-Out is only a short pulse, not the ~200 ms All-Rows level -- measured width + one-time warning + camera probe (mock-tested; root cause NOT yet found)
+
+User finding: camera_parameters['exp_out_mode'] = 1 (All Rows) is set,
+but a scope on Expose-Out shows only a short pulse, nowhere near the
+200 ms exposure -- they suspect Line Output (4, the mesoSPIM default).
+
+Why it matters here: this backend (a) starts the ETL on Expose-Out's
+RISING edge and (b) treats Expose-Out going low as "exposure finished"
+(then laser blanking is released). A short pulse means the ETL sweep is
+not aligned with the exposure and run_tasks() can return before the
+exposure really ends.
+
+Evidence already in the logs (inference from timings, not a
+measurement): run_tasks was ~0.35 s every frame with a 200 ms exposure,
+while its own serial overhead before polling (pointer move ~103 ms +
+trigger set/clear) was ~0.15-0.25 s and "Expose-Out high after" was
+~100-200 ms -- i.e. high was first seen ~0.35 s in and low followed
+almost at once. A 200 ms level would have pushed run_tasks to >= ~0.5
+s. This agrees with the scope.
+
+What the docs say (Photometrics PVCAM "Exposure modes"): All Rows is
+high for exactly the exposure time (last-row start to first-row end);
+First Row = first row's exposure; Any Row = longer (adds the rolling
+sweep); Line Output = a short pulse per line readout. PVCAM docs for
+programmable scan mode are silent on whether it forces or restricts the
+Expose-Out mode. In pyvcam (v2.3.2 source read) exp_out_mode is OR-ed
+into the exposure mode when acquisition starts, so setting it once in
+open_camera() should apply; the stock configs pair scan_mode=1 (Line
+Delay) with exp_out_mode=4. WHY the camera does not follow mode 1 on
+this bench is therefore still UNKNOWN.
+
+Changes:
+- run_tasks() now measures how long Expose-Out stayed high (resolution
+  ~ one poll round-trip, ~25 ms), adds "high for ~N ms (exposure M ms)"
+  to the per-frame timing line, and logs ONE WARNING (also printed) per
+  live session when it is shorter than expose_width_warn_fraction
+  (default 0.5) of the exposure; exposures < 0.1 s are not checked
+  (too short to resolve). Silence with expose_width_warn_fraction 0.
+- New tools/asi_tiger_camera_expose_out_probe.py (pyvcam only; no ASI
+  hardware): applies mesoSPIM's own camera setup, READS BACK
+  PARAM_EXPOSE_OUT_MODE / scan params right after setting and while
+  running (shows whether the value survives), free-runs the camera so
+  Expose-Out can be scoped, and --sweep [--sweep-scan] walks modes 0-4
+  (and scan modes Auto/Line Delay). Every pyvcam call it makes was
+  checked against pyvcam 2.3.2's source; it has NOT been run against a
+  camera.
+
+PROBE FIX (user's first run): the probe aborted with PL_ERR_ACCESS_DENIED on PARAM_SCAN_LINE_DELAY -- that parameter is only writable in Line Delay scan mode, not Auto. apply_setup() now skips it outside scan mode 1 and reports (instead of aborting on) any setting the camera refuses. First run also confirmed: camera IRIS_15MP_MONO / GSENSE5130; Expose-Out modes offered = First Row 0, All Rows 1, Any Row 2, Rolling Shutter 3, Line Output 4; exposure modes Internal Trigger 1792, Edge Trigger 2304, Trigger first 2048.
+
+NOTE: the earlier comment in _etl_period_ms() that, after switching to
+All Rows, "Expose-Out's duration now equals the REAL configured
+exposure exactly" is now in question for the current setup.
+
+Mock-tested: a ~170 ms level on a 200 ms exposure -> no warning; a 30 ms
+pulse -> exactly one warning, not repeated, re-armed by begin_live(),
+silenced by fraction 0, skipped for 50 ms exposures; all earlier suites
+pass.
+
+## Expose-Out "short pulse" explained (log 44929253, hardware): All Rows is short when the sweep is long
+
+**Camera mode is correct, mesoSPIM does not override it.** Read-back logged at open_camera(): Expose-Out mode 1, exposure mode 2304 (Edge Trigger), config file `config_benchtop_ASI_2026.py` (cfg `exp_out_mode` 1). The only write of `exp_out_mode` in stock mesoSPIM_Camera.py is in open_camera().
+
+**What the log shows (200 ms exposure, every frame):** Expose-Out first seen high ~198 ms after the trigger pulse ended, high for ~1 poll (~22 ms). The probe's two-pulse pattern (long, then short) was the probe's own start/stop artifact (Internal Trigger, `poll_frame` raised 'Acquisition not active' 0.4 s after start_live), not the mesoSPIM situation.
+
+**Working hypothesis (NOT yet bench-confirmed):** All Rows is high only while every row exposes at once, about (exposure - sweep time). With ASLM line delay the sweep takes most of the exposure, so All Rows is a short pulse near the END of the exposure. The numbers fit (pulse ~215-230 ms after the trigger edge, ~20 ms wide). If so, the ETL (started by Expose-Out's rising edge) starts ~180 ms late and laser blanking ends early. Prediction to test: `exp_out_mode: 2` (Any Row, high from first row start to last row end) should log "high after" near 0-40 ms and "high for" about exposure + sweep; `exp_out_mode: 0` about the exposure length from the start.
+
+**HARDWARE-CONFIRMED (log e977f8da, `exp_out_mode: 2` Any Row, read-back 2):** every frame logs "Expose-Out high after: 8 ms, high for ~380-418 ms (exposure 200 ms)" versus ~198 ms / ~22 ms with All Rows. So the rolling-shutter sweep is about 190 ms, All Rows was a short window near the end of the exposure, and Any Row gives the rise at the first row's start (ETL starts with the sweep) and a level spanning the whole exposure + sweep (laser blanking covers every row). Cost: frame time 0.48 s -> 0.66 s at 200 ms exposure (the window really is longer). Example config now documents the modes; recommended for ASLM: `exp_out_mode: 2`. Not yet checked: ETL ramp period (200 ms) vs the ~190 ms sweep in the actual images.
+
+**Change:** the one-time width warning no longer claims a wrong camera mode; it explains the All Rows / line delay case and suggests Any Row.
+
 ## Rollback
 
-This patch is purely additive at the mesoSPIM-control level -- the only
-change to existing files is the 2-line `elif` branch in
-`mesoSPIM_Core.py`. Setting `waveformgeneration = 'NI'` (or `'cDAQ'` /
-`'DemoWaveFormGeneration'`) in your config continues to use the
-untouched original code path.
+This patch is purely additive at the mesoSPIM-control level. The only
+changes to EXISTING mesoSPIM-control files are: in `mesoSPIM_Core.py`
+-- two small `elif` branches (plus their imports; one for
+`waveformgeneration`, one for `laser`), `sig_polling_stage_position_*`
+handling (new set_interval signal + three small helpers; snap()/live()
+pause polling only for the ASI_Tiger backend), and a guarded `begin_live()`/`end_live()`
+call pair (try/finally) around the live() loop (harmless for every backend, since
+restarting an already-running timer is a no-op) -- and in
+`asicontrol.py`, the `serial_lock` addition (new import, one new
+attribute, one `with` block around `_send_command()`'s existing body
+-- no behavior change for plain ASI-stage-only setups, since a lock
+only this file's own code ever acquires changes nothing observable).
+Setting `waveformgeneration = 'NI'` (or `'cDAQ'`/`'DemoWaveFormGeneration'`)
+and `laser = 'NI'`/`'cDAQ'`/`'Demo'` in your config continues to use
+the untouched original code path.

@@ -294,6 +294,21 @@ class ASITigerDAC:
         to take effect"). Sending PR alone changes nothing about the
         ACTUAL hardware output range yet.
 
+        FURTHER CONFIRMED ON REAL HARDWARE (by the user, on card 35 --
+        NOT found in any ASI documentation this project has managed to
+        fetch; several attempts to fetch ASI's own SS/PR doc pages
+        returned errors, so this is real-hardware-confirmed only, not
+        doc-confirmed): sending PR alone was NOT enough to survive an
+        actual power cycle -- the range reverted. Explicitly sending
+        `SS Z` (card-addressed -- see save_settings() below) AFTER PR
+        is what made the new range genuinely persist across a real
+        power-down/power-up cycle. Always call save_settings(card_addr)
+        after set_range() if you need the new range to survive a real
+        power cycle, not just a soft reset/restart -- this method does
+        NOT do that for you automatically, since PR+SS changes real,
+        persistent hardware state and shouldn't happen silently as a
+        side effect of a method whose name doesn't say so.
+
         Because of that, this method deliberately does NOT update this
         channel's cached range_code (and thus limits_mv, which
         set_voltage()'s safety check relies on) immediately -- doing so
@@ -349,6 +364,37 @@ class ASITigerDAC:
         for other in self.channels.values():
             if other.card_addr == card_addr:
                 other.range_code = range_code
+
+    def save_settings(self, card_addr: int):
+        """
+        Sends `SS Z` (card-addressed) to commit the card's current
+        settings -- including a just-sent PR range change -- to
+        non-volatile flash, so they survive a real power cycle.
+
+        CONFIRMED ON REAL HARDWARE by the user (card 35): after
+        set_range() alone, the new PR range reverted on a real power
+        cycle; sending `SS Z` afterward made it persist correctly.
+        This is the user's own direct finding, not something
+        independently confirmed against ASI's written documentation --
+        several attempts to fetch ASI's own SS/PR doc pages from this
+        project returned errors (provenance/rate-limit issues, not a
+        content lookup that came back empty), so the exact general
+        semantics of `SS <param>` (whether `Z` specifically means "all
+        current settings" vs. something narrower, and whether other
+        param values exist) are UNCONFIRMED beyond this one
+        real-hardware data point. Treat `Z` as the one value this
+        project has actually confirmed works for this purpose; don't
+        assume other values without checking ASI's docs directly or
+        testing on real hardware first.
+
+        Call this ONCE per card_addr, AFTER set_range() -- it is a
+        card-wide save, not per-axis. Does NOT itself wait for or
+        confirm a power cycle; pair with a real power-cycle and a
+        query_range() check afterward (see
+        tools/asi_tiger_laser_dac_range_setup.py) before trusting the
+        new range as genuinely persistent.
+        """
+        self.tiger.send_command("SS Z", card_addr=card_addr)
 
     def pending_range_change(self, card_addr: int) -> Optional[int]:
         """Returns the range_code requested via set_range() for this

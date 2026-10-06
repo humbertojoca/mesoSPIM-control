@@ -102,9 +102,10 @@ def main():
     args = parser.parse_args()
 
     period_ms = 1000.0 / args.frequency
-    peak = args.amplitude / 2 + abs(args.offset)
-    swing_lo = args.offset - args.amplitude / 2
-    swing_hi = args.offset + args.amplitude / 2
+    # abs(): a NEGATIVE amplitude only reverses the ramp direction; the excursion is the same
+    peak = abs(args.amplitude) / 2 + abs(args.offset)
+    swing_lo = args.offset - abs(args.amplitude) / 2
+    swing_hi = args.offset + abs(args.amplitude) / 2
 
     print(f"Pattern: {args.pattern}")
     print(f"units_per_volt: {args.units_per_volt:.4f} "

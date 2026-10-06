@@ -15,6 +15,23 @@ ETL/galvo cards' axis layout was (via the N command, early in this
 project) -- which physical output actually corresponds to which axis
 letter.
 
+REAL-HARDWARE FINDING, with real Oxxius L4Cc lasers (638/561/488/405):
+an earlier default here (--range-code 1, --max-volts 4.0) only ever
+reached ~70mW of these lasers' rated 100mW, confirmed from the real
+Oxxius L4Cc/L6Cc user manual -- their analog modulation input is
+LINEAR 0V=0% to 5V=100%, so a 4.096V ceiling can never reach 100%
+regardless of what's requested. Defaults changed below to range_code 2
+(0-10.24V) and --max-volts 5.5 (just above the real 100% point, to
+confirm power plateaus there) -- but --range-code here is only ever a
+CLIENT-SIDE safety-limit label, NOT a real hardware range change (the
+real range needs the 'PR' command plus a controller power-cycle/reset
+-- see tools/asi_tiger_laser_dac_range_setup.py, which you should run
+ONCE against your real rack BEFORE trusting these new defaults to mean
+what they say). This script does not know or check whether that's
+been done; if it hasn't, set_voltage() will raise a clear ValueError
+when this sweep tries to exceed whatever the hardware's REAL,
+unconfirmed range actually is, rather than silently underpowering.
+
 Put a scope on whichever laser intensity output(s) you want to check
 before running this -- default tests all 4 axes (P,Q,R,S), pass
 --n-lasers to test fewer if you only have some wired right now.
@@ -47,14 +64,19 @@ def main():
     parser.add_argument("--axes", nargs="+", default=["P", "Q", "R", "S"])
     parser.add_argument("--n-lasers", type=int, default=None,
                          help="Only test the first N of --axes (default: test all of --axes)")
-    parser.add_argument("--range-code", type=int, default=1,
-                         help="DAC range code -- default 1 (0-4.096V), matching this rack's "
-                              "ETL/other unipolar channels. NOT confirmed as the right range for "
-                              "your actual laser driver hardware -- a reasonable starting "
-                              "assumption, override if your hardware needs something else.")
-    parser.add_argument("--max-volts", type=float, default=4.0,
-                         help="Top of the test sweep -- kept safely under range_code=1's 4.096V "
-                              "ceiling by default")
+    parser.add_argument("--range-code", type=int, default=2,
+                         help="DAC range code -- default 2 (0-10.24V). CHANGED from an earlier "
+                              "default of 1 (0-4.096V) after a real-hardware finding: Oxxius "
+                              "L4Cc/L6Cc lasers need up to 5V for 100%% power (confirmed from "
+                              "their own manual), which range_code=1 can never reach. This is "
+                              "only a CLIENT-SIDE label (see set_voltage()'s safety-limit check) "
+                              "-- it does NOT itself change the real hardware range. Run "
+                              "asi_tiger_laser_dac_range_setup.py ONCE first if you haven't "
+                              "already confirmed this card's real range matches.")
+    parser.add_argument("--max-volts", type=float, default=5.5,
+                         help="Top of the test sweep -- default 5.5V, just above the Oxxius "
+                              "L4Cc/L6Cc's documented 5V=100%% point (so you can confirm power "
+                              "plateaus there), safely under range_code=2's 10.24V ceiling.")
     parser.add_argument("--n-levels", type=int, default=4,
                          help="How many evenly-spaced voltage levels to test per axis, from 0 "
                               "to --max-volts")
@@ -94,7 +116,7 @@ def main():
                 print(f"  Setting {v:.3f}V...")
                 dac.set_voltage(name, v)
                 time.sleep(args.hold_s)
-            print(f"  Returning to 0V...")
+            print("  Returning to 0V...")
             dac.set_voltage(name, 0.0)
             time.sleep(args.hold_s)
 

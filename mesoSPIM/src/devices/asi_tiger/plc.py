@@ -141,13 +141,48 @@ class PLCCard:
     # See clear_state()'s docstring for why this tracking exists: HOME
     # does NOT do this for you.
     _output_addrs: set = field(default_factory=set, init=False, repr=False)
+    # Last state this instance wrote to each directly-driven (CCA F) cell,
+    # used ONLY by set_cell_state() to skip redundant writes. REAL-HARDWARE
+    # FINDING (live() frame-timing log): every set_cell_state() costs a
+    # `M E=<cell>` pointer move that takes ~103 ms on this rack, and live()
+    # was re-sending ~10 of them per frame for states that were already
+    # set (laser lines re-cleared, camera cell cleared twice). The POINTER
+    # position is deliberately NOT cached -- a skipped pointer move would
+    # make a later CCA F land on the wrong cell (possibly the wrong laser);
+    # skipping a write whose cell already holds the wanted state cannot.
+    # Cleared on any error, any (re)configuration of that cell, and any
+    # reset/clear/teardown call; see invalidate_state_cache().
+    _cell_state_cache: dict = field(default_factory=dict, init=False, repr=False)
+
+    # OPT-IN pointer tracking (default OFF). When True, _select() skips an
+    # `M <axis>=<addr>` that repeats the last pointer position THIS instance
+    # set, saving a ~103 ms serial round-trip on this rack. Only safe while
+    # nothing else moves this card's pointer: the waveformer turns it on only
+    # inside live() (stage polling paused, nothing else addresses this card)
+    # and off again afterwards. Cleared on any error and by
+    # invalidate_state_cache().
+    track_pointer: bool = field(default=False, init=False)
+    _ptr: Optional[int] = field(default=None, init=False, repr=False)
+
+    def invalidate_state_cache(self):
+        """Forget what we think every cell holds AND where the pointer is;
+        the next set_cell_state() per cell / _select() is then always sent.
+        Call after anything that may have changed cell state or the pointer
+        behind this object's back."""
+        self._cell_state_cache.clear()
+        self._ptr = None
 
     # ------------------------------------------------------------------
     # Pointer + raw cell/IO programming
     # ------------------------------------------------------------------
     def _select(self, addr: int):
-        """Move the card's internal pointer to a cell or I/O address."""
+        """Move the card's internal pointer to a cell or I/O address.
+        (Skipped when track_pointer is on and the pointer is already there.)"""
+        if self.track_pointer and self._ptr == addr:
+            return
+        self._ptr = None  # unknown until the move is confirmed
         self.tiger.send_command(f"M {self.axis}={addr}", card_addr=self.card_addr)
+        self._ptr = addr
 
     def configure_cell(
         self,
@@ -169,6 +204,7 @@ class PLCCard:
         """
         if cell_type not in CELL_TYPE:
             raise ValueError(f"Unknown cell_type {cell_type!r}; valid: {list(CELL_TYPE)}")
+        self._cell_state_cache.pop(cell_num, None)  # re-typing a cell resets its state
         self._select(cell_addr(cell_num))
         self.tiger.send_command(f"CCA Y={CELL_TYPE[cell_type]}", card_addr=self.card_addr)
         if config is not None:
@@ -253,6 +289,7 @@ class PLCCard:
         disrupt any currently running acquisition/logic on this card.
         Confirm nothing else depends on the current PLC state first.
         """
+        self.invalidate_state_cache()
         for cell in range(1, 17):
             self.configure_cell(cell, "constant", config=0)
         for bnc in range(1, 9):
@@ -283,6 +320,7 @@ class PLCCard:
         HOME's documented syntax uses -- caused a real TimeoutError. Fixed
         to '{card_addr}! {axis}'.)
         """
+        self.invalidate_state_cache()
         self.tiger.send_command(f"! {self.axis}", card_addr=self.card_addr)
 
     def safe_all_outputs(self):
@@ -328,6 +366,7 @@ class PLCCard:
         clear_state() -- see clear_state()'s docstring for why. Safe to
         call even if nothing was ever configured as an output (no-op).
         """
+        self.invalidate_state_cache()
         for addr in list(self._output_addrs):
             self.configure_io(addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=CONST_LOW)
 
@@ -719,15 +758,31 @@ class PLCCard:
         to the same type) is documented to clear the cell's prior
         config/state, which isn't the effect wanted for a clean pulse.
         """
+        self.invalidate_state_cache()
+        self._ptr = None
         self.tiger.send_command(f"M E={cell_addr(init_cell)}", card_addr=self.card_addr)
         self.tiger.send_command(f"CCA Z={CONST_LOW}", card_addr=self.card_addr)
         self.tiger.send_command(f"CCA Z={CONST_HIGH}", card_addr=self.card_addr)
         self.tiger.send_command(f"CCA Z={CONST_LOW}", card_addr=self.card_addr)
 
     def set_cell_state(self, cell_num: int, high: bool):
-        """Directly set a stateful cell's (flip-flop) output (CCA F)."""
-        self._select(cell_addr(cell_num))
-        self.tiger.send_command(f"CCA F={1 if high else 0}", card_addr=self.card_addr)
+        """Directly set a stateful cell's (flip-flop) output (CCA F).
+
+        Skipped entirely (no serial traffic) if this instance already wrote
+        that same state to that cell and nothing has invalidated it since --
+        see _cell_state_cache. Any failure invalidates the whole cache so
+        the next call re-sends for real."""
+        high = bool(high)
+        if self._cell_state_cache.get(cell_num) is high:
+            return
+        try:
+            self._select(cell_addr(cell_num))
+            self.tiger.send_command(f"CCA F={1 if high else 0}", card_addr=self.card_addr)
+        except BaseException:
+            self._cell_state_cache.clear()
+            self._ptr = None
+            raise
+        self._cell_state_cache[cell_num] = high
 
     def read_cell_state(self, cell_num: int) -> float:
         """
