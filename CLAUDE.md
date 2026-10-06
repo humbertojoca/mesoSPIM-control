@@ -2,6 +2,13 @@
 
 Put this file at the root of your mesoSPIM-control fork as `CLAUDE.md`. It is a condensed state of the work so far. `PATCHNOTES_ASI_TIGER.md` has the full dated history.
 
+## Where we left off (2026-10-06)
+- Branch `asitiger-v0.9` was created from v0.8 (pushed) as the working branch for the next round. v0.7 and v0.8 are pushed.
+- The user is doing physical alignment and building a structured phantom. Software testing resumes after that.
+- First tasks on return: image quality with the phantom in 20 ms ASLM on both arms (ETL offset / amplitude / sweeptime tuning against real structure), then a multi-row acquisition with real Z steps (images, not just logs).
+- Current daily config (user's, gitignored): 20 ms exposure, `etl_period_source: 'sweeptime'` (sweeptime 0.270 s, ramps L 90 / R 90 -> 243 ms), `etl_follow_ramp_direction: True`, `laser_gate_with_expose_out: True` + `laser_blanking = 'stack'`, `acq_track_plc_pointer: True`, `ttl_motion_enabled: False`, `camera_line_time_base_us: 9.5`.
+- Measured: ~0.26 s per plane in live and acquisition (was 0.78 s at the start of 2026-10-06).
+
 ## What this is
 A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives an ASI Tiger TG-1000 (stage, PLogic and DAC cards) as a replacement for NI hardware in mesoSPIM-control. It is integrated as `mesoSPIM_ASITigerWaveFormGenerator` plus `ASITiger_LaserEnabler`. Base commit of the stock repo: `98d74d35bdc6dbc9523cf9ddbed59f262b629a66`. Core changes live in `mesoSPIM_Core_patch_reference/mesoSPIM_Core.py.diff` (apply with `git apply`).
 
