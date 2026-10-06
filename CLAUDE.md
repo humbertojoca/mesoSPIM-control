@@ -34,7 +34,7 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 - Display skipping frames during acquisition is stock mesoSPIM (`camera_display_temporal_subsampling`, default 2), not a bug.
 
 ## Mock-only, still waiting for hardware confirmation
-- Laser gating: a laser change DURING live (with 'stack'), and a scope check of laser BNC vs. Expose-Out.
+- Laser gating: optional scope check of laser BNC vs. Expose-Out (laser change during live is confirmed, log 20261006-150530).
 - Slow stage-position polling during live (Core patch needs re-applying).
 - ETL raw amplitude, ramp direction and limits, and the `PR` range query logging.
 - Whether the ETL ramp period (200 ms) matches the roughly 190 ms sweep in the actual images.

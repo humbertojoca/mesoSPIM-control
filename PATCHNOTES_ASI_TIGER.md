@@ -4659,7 +4659,8 @@ Display skipping frames during acquisition (user report) is stock mesoSPIM: meso
 - Live: 0.43-0.44 s per frame (was ~0.66), camera live frame rate 1.98-2.17 fps. Steady-state frames show no `36M E=` pointer move (slowest command is an Expose-Out poll, ~11 ms); ~31-34 commands per frame, mostly polls. The user tuned ETL offset/amplitude and galvo offset/amplitude live on both arms with this running.
 - Acquisition list, 2 rows (488 nm Left, 561 nm Right, 10 planes each): 0.43-0.44 s per plane, camera frame rate 2.07-2.08 fps (was 1.49 with `acq_track_plc_pointer` alone, 1.29 before that).
 - Per frame now: run_tasks ~0.43 s = trigger set/clear + Expose-Out high ~0.39 s (exposure + rolling sweep); everything else (Z step, processEvents) ~0.01 s. The per-frame design is within ~40 ms of the Expose-Out window.
-- NOT yet checked: a laser change DURING live (the log only changes the laser between live sessions), and a scope check of laser BNC vs. Expose-Out.
+- Laser change DURING live (log 20261006-150530): 488 -> 561 nm at 15:06:12. The next frame shows the enable-line switch (53 commands, pointer moves `36M E=..`, run_tasks 0.53 s), then live returns to 0.43-0.44 s per frame. Left -> Right during live at 15:06:21: one reconfigure frame (0.69 s), then normal. The user kept live running through both changes.
+- Still optional: a scope check of laser BNC vs. Expose-Out BNC 3.
 
 ## Rollback
 
