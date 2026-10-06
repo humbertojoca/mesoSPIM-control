@@ -91,6 +91,8 @@ def configure_laser_enable_lines(
     plc: PLCCard,
     laser_bncs: Sequence[int] = (5, 6, 7, 8),
     toggle_cells: Sequence[int] = (12, 13, 14, 15),
+    gate_source_addr: Optional[int] = None,
+    gate_cells: Optional[Sequence[int]] = None,
 ) -> LaserEnableLines:
     """
     Wires one independent, directly-toggleable enable line per BNC in
@@ -105,16 +107,34 @@ def configure_laser_enable_lines(
         configure_zstack_trigger_chain()) if both are configured on the
         same PLC card at once -- override if those collide with
         something else already configured on this card.
+    gate_source_addr / gate_cells: optional hardware blanking. If set,
+        each BNC is driven by an and2 cell (gate_cells[i]) = enable
+        cell AND gate_source_addr (e.g. bnc_addr(camera Expose-Out)),
+        so a line is high only while enabled AND the camera exposes.
     """
     if len(laser_bncs) != len(toggle_cells):
         raise ValueError(
             f"laser_bncs and toggle_cells must be the same length -- "
             f"got {len(laser_bncs)} and {len(toggle_cells)}"
         )
-    for bnc, cell in zip(laser_bncs, toggle_cells):
+    if gate_source_addr is not None:
+        if gate_cells is None or len(gate_cells) != len(toggle_cells):
+            raise ValueError("gate_cells must give one cell per laser when gate_source_addr is set")
+        overlap = set(gate_cells) & set(toggle_cells)
+        if overlap:
+            raise ValueError(f"gate_cells and toggle_cells overlap: {sorted(overlap)}")
+    for i, (bnc, cell) in enumerate(zip(laser_bncs, toggle_cells)):
         plc.configure_cell(cell, "d_flop", inputs={"a": 0, "b": 0, "c": 0})
         plc.set_cell_state(cell, False)
-        plc.configure_io(bnc_addr(bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=cell_addr(cell))
+        source = cell_addr(cell)
+        if gate_source_addr is not None:
+            # Hardware blanking: BNC = enable cell AND gate source (e.g. camera
+            # Expose-Out). The enable cell is already low, so the gate output is
+            # low before the BNC is switched to it.
+            gate = gate_cells[i]
+            plc.configure_cell(gate, "and2", inputs={"a": gate_source_addr, "b": cell_addr(cell)})
+            source = cell_addr(gate)
+        plc.configure_io(bnc_addr(bnc), IO_TYPE_PUSH_PULL_OUTPUT, source_addr=source)
     return LaserEnableLines(plc=plc, bncs=tuple(laser_bncs), cells=tuple(toggle_cells))
 
 

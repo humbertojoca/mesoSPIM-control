@@ -4639,6 +4639,28 @@ Note on the Expose-Out width in the timing line: with tracking OFF it reads ~250
 
 Display skipping frames during acquisition (user report) is stock mesoSPIM: mesoSPIM_Camera.add_images_to_series() shows only every `camera_display_temporal_subsampling`-th frame (default 2; set it in `startup`). All frames are saved.
 
+## 2026-10-06: Hardware laser gating by camera Expose-Out (`laser_gate_with_expose_out`, HARDWARE-CONFIRMED: timing and normal use; see the end of this entry)
+
+**Why (instead of TTL motion first):** the 25-plane log (`acq_track_plc_pointer` True) puts each ~0.66 s plane at: ~0.40 s Expose-Out high (physical), ~0.21 s for 2 PLC pointer moves (trigger cell 10 <-> laser cell, because Core switches the laser line every frame), ~0.04 s small commands, and only ~0.01-0.02 s for the serial Z step. So TTL Z alone would save ~3%. Per-frame laser blanking in hardware removes the pointer moves. The user chose "gating, then TTL Z".
+
+**What:** opt-in `asi_dac_parameters['laser_gate_with_expose_out']` (default False). `configure_laser_enable_lines()` gains `gate_source_addr` / `gate_cells`: each laser BNC (5-8) is driven by an `and2` cell = enable cell (12-15, unchanged d_flop) AND the camera Expose-Out BNC input level (`bnc_addr(camera_expose_bnc)`, the same signal that starts the ETL). Gate cells: `plc_laser_gate_cells`, default (8, 9, 11, 16) (avoids trigger cell 10, enables 12-15, and cells 1-7 used by zstack_chain). The enable cell is written low before the BNC is switched to the gate, so there is no glitch. Use with stock `laser_blanking = 'stack'`: Core then switches the laser line once per row (acquisition) or session (live), and the PLC blanks each frame from Expose-Out (Any Row: first row start to last row end).
+
+**Live laser change:** with 'stack', Core's live() enables the laser line only once before the loop, so a laser change during live would leave the OLD line enabled (no light). With gating on, write_waveforms_to_tasks() calls `laserenabler.enable(current laser)` every live frame. The cell cache makes it free unless the line changed.
+
+**config_check warnings:** gating on with laser_blanking not 'stack' (works, but no speed-up), and 'stack' with gating off (laser on between frames for the whole stack).
+
+**Mock (new `mock_gating.py` + shared `mock_infra.py`; the fake PLC now records cell types, CCB inputs and I/O sources):** gate cells 8/9/11/16 = and2(35, 12/13/14/15) and BNCs 5-8 sourced from them; default-off wiring unchanged. Steady-state PLC pointer moves per frame: 2 -> **0** (acquisition and live). The laser line is switched on once per row. Two rows with different laser and arm. Live 488 -> 638 mid-session: the old line goes off, the new one on, the DAC channel follows. Warnings fire as intended. A gate cell that collides with the trigger cell raises. The regression suite `mock_acq_rows.py` still passes. **Expected on hardware: ~0.66 -> ~0.45 s per frame at 200 ms exposure, live and acquisition.**
+
+**User config for testing:** `laser_gate_with_expose_out: True` and `laser_blanking = 'stack'` (revert: False + 'images').
+
+**Hardware checks:** frame time; no light between frames (the laser output only during exposure, e.g. on a scope: laser BNC vs. Expose-Out BNC 3); no dark frames; laser change during live; Left/Right and laser changes between rows.
+
+**HARDWARE-CONFIRMED (log 20261006-145515, gating on + 'stack', 200 ms exposure):**
+- Live: 0.43-0.44 s per frame (was ~0.66), camera live frame rate 1.98-2.17 fps. Steady-state frames show no `36M E=` pointer move (slowest command is an Expose-Out poll, ~11 ms); ~31-34 commands per frame, mostly polls. The user tuned ETL offset/amplitude and galvo offset/amplitude live on both arms with this running.
+- Acquisition list, 2 rows (488 nm Left, 561 nm Right, 10 planes each): 0.43-0.44 s per plane, camera frame rate 2.07-2.08 fps (was 1.49 with `acq_track_plc_pointer` alone, 1.29 before that).
+- Per frame now: run_tasks ~0.43 s = trigger set/clear + Expose-Out high ~0.39 s (exposure + rolling sweep); everything else (Z step, processEvents) ~0.01 s. The per-frame design is within ~40 ms of the Expose-Out window.
+- NOT yet checked: a laser change DURING live (the log only changes the laser between live sessions), and a scope check of laser BNC vs. Expose-Out.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level. The only

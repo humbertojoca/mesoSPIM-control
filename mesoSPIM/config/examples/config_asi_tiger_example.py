@@ -106,6 +106,14 @@ asi_dac_parameters = {
     'acq_track_plc_pointer': True,               # optional, default True -- the same skip outside live: acquisition
                                                  # rows and single snaps. Hardware-confirmed: ~0.78 -> ~0.67 s per
                                                  # plane at 200 ms exposure, laser blanking intact
+    'laser_gate_with_expose_out': False,         # optional, default False (mock-tested, NOT yet hardware-confirmed):
+                                                 # each laser BNC = its enable cell AND camera Expose-Out, in the PLC,
+                                                 # so lasers are blanked by the camera's own exposure window. Pair
+                                                 # with laser_blanking = 'stack' (top level): Core then switches the
+                                                 # laser line once per row/live session, not per frame, saving ~2
+                                                 # pointer moves (~0.2 s) per frame. No new wiring.
+    'plc_laser_gate_cells': (8, 9, 11, 16),      # optional, the and2 cells used for that gate (one per laser; must not
+                                                 # use the trigger cell 10, the enable cells 12-15, or 1-7 kept for zstack_chain)
     'expose_width_warn_fraction': 0.5,           # optional, default 0.5: warn once per live session if Expose-Out is high for
                                                  # less than this fraction of the exposure (Any Row should be ~ exposure + sweep).
                                                  # 0 silences it. Only checked for exposures >= expose_width_check_min_exposure_s (0.1)

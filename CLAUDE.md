@@ -30,9 +30,11 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 - Stage x/f display and focus fixed by putting `stage_assignment` in card order (2026-10-06).
 - Right galvo scans after the `galvo_r_amplitude` fix (2026-10-06).
 - `acq_track_plc_pointer` (2026-10-06): 25-plane row ~0.78 -> ~0.67 s per plane, 1.29 -> 1.49 fps. Laser blanking intact, all frames saved. Acquisition now matches live (~0.66 s per frame). One timing line per plane.
+- Hardware laser gating (`laser_gate_with_expose_out` + `laser_blanking = 'stack'`, on in the user's config; and2 cells 8/9/11/16 = enable AND Expose-Out). Live 0.66 -> 0.43-0.44 s per frame (~2.1 fps), acquisition 0.67 -> 0.44 s per plane (2.08 fps). Per frame is now ~Expose-Out window (~0.39 s) + ~40 ms.
 - Display skipping frames during acquisition is stock mesoSPIM (`camera_display_temporal_subsampling`, default 2), not a bug.
 
 ## Mock-only, still waiting for hardware confirmation
+- Laser gating: a laser change DURING live (with 'stack'), and a scope check of laser BNC vs. Expose-Out.
 - Slow stage-position polling during live (Core patch needs re-applying).
 - ETL raw amplitude, ramp direction and limits, and the `PR` range query logging.
 - Whether the ETL ramp period (200 ms) matches the roughly 190 ms sweep in the actual images.
@@ -40,13 +42,13 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 ## Open items and possible next steps
 - The user is aligning lasers and setting galvo and ETL offsets and amplitudes now.
 - Acquisition-rows testing on hardware is next. The user's config has `ttl_motion_enabled: False` for this (set 2026-10-06 at the user's request).
-- **TTL motion (wanted later for faster acquisitions).** The current per-frame design needs `ttl_motion_enabled: False` (Core steps Z/F over serial each plane). Supporting TTL motion means driving the stage cards' TTL input from the PLC (for example from Expose-Out falling or the trigger cell) so Z steps in hardware, and letting Core skip `move_relative`. This touches the earlier zstack_chain and stage-TTL work. Not started.
+- **TTL motion (next after laser gating; the user chose "gating, then TTL Z").** With gating, a whole plane is ~0.44 s of which ~0.39 s is the Expose-Out window, and Z step + Core overhead is ~10 ms, so TTL Z alone is ~2%. Further speed has to come from the camera side (exposure, line delay/sweep). It matters as the step toward the autonomous loop. The current per-frame design needs `ttl_motion_enabled: False` (Core steps Z/F over serial each plane). Supporting TTL motion means driving the stage cards' TTL input from the PLC (for example from Expose-Out falling or the trigger cell) so Z steps in hardware, and letting Core skip `move_relative`. This touches the earlier zstack_chain and stage-TTL work. Not started.
 - Set `frame_timing_log` to False once troubleshooting is done.
 - Possible further per-frame trimming in live: the remaining laser DAC set and zero, and two pointer moves.
 
 ## Tools (`tools/`)
 - Python env: mesoSPIM-control runs in `conda activate C:\Users\Public\mamba\envs\mesoSPIM-py312` (Python 3.12, has `serial`, PyQt5, `nidaqmx`). Use `C:/Users/Public/mamba/envs/mesoSPIM-py312/python.exe` for compiling and mock tests. `python` is not on PATH.
-- Mock testing: no harness is saved in the repo. Fake the serial port under the real `TigerController`, and stub the NI base class.
+- Mock testing: no harness is saved in the repo (the session scratchpad had `mock_infra.py`, `mock_acq_rows.py` and `mock_gating.py`). Fake the serial port under the real `TigerController`, and stub the NI base class.
 - `asi_tiger_camera_expose_out_probe.py`: pyvcam-only probe of Expose-Out and scan modes. The Internal Trigger run stops quickly, so it is not representative of mesoSPIM's Edge Trigger path.
 - `asi_tiger_singleaxis_test.py` and the other bench scripts: see their docstrings.
 

@@ -335,6 +335,20 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
                 "position will not track the acquisition at all."
             )
 
+        gated = bool(ah.get("laser_gate_with_expose_out", False))
+        blanking = getattr(self.cfg, "laser_blanking", "images")
+        if gated and blanking not in ("stack", "stacks"):
+            logger.warning(
+                "ASI Tiger: laser_gate_with_expose_out is on (lasers blanked in hardware by camera "
+                "Expose-Out), but laser_blanking is not 'stack', so Core still switches the laser "
+                "line every frame (~2 PLC pointer moves, ~0.2 s per frame). Set laser_blanking = "
+                "'stack' to get the speed-up.")
+        elif not gated and blanking in ("stack", "stacks"):
+            logger.warning(
+                "ASI Tiger: laser_blanking is 'stack' but laser_gate_with_expose_out is off, so the "
+                "laser stays ON for the whole stack/live session, including between frames. Turn on "
+                "asi_dac_parameters['laser_gate_with_expose_out'] for per-frame blanking in hardware.")
+
         logger.warning(
             "ASI Tiger backend: true per-frame triggering (see this module's ARCHITECTURE "
             "NOTE) -- each run_tasks() call fires one camera trigger and waits for that one "
@@ -630,6 +644,15 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
                 raise
         else:
             self._dac.set_voltage(dac_ch, voltage)
+
+        if self._live_mode and ah.get("laser_gate_with_expose_out", False) and laser_name in self.cfg.laserdict:
+            # With hardware gating, laser_blanking='stack' makes Core enable the laser
+            # line only once, before the live loop, so a laser change during live would
+            # leave the OLD line enabled. Re-enable the current line every live frame;
+            # the PLC cell cache makes this free unless the line actually changed.
+            enabler = getattr(self.parent, "laserenabler", None)
+            if enabler is not None:
+                enabler.enable(laser_name)
 
         if self._lr_switch is not None:
             self._lr_switch.select(is_right=(side == "Right"))

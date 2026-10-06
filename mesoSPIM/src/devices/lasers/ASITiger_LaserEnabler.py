@@ -56,7 +56,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from ..asi_tiger import configure_laser_enable_lines
+from ..asi_tiger import configure_laser_enable_lines, bnc_addr
 
 
 class ASITiger_LaserEnabler:
@@ -116,9 +116,21 @@ class ASITiger_LaserEnabler:
                 f"Config file: len(asi_dac_parameters['plc_laser_bncs']) ({len(bncs)}) "
                 f"must equal num(lasers) in 'laserdict' ({len(self.laserdict)})."
             )
-        self._lines = configure_laser_enable_lines(plc, laser_bncs=bncs, toggle_cells=cells)
+        gate_src, gate_cells = None, None
+        if ah.get("laser_gate_with_expose_out", False):
+            # Hardware blanking: each laser BNC = its enable cell AND camera Expose-Out
+            # (BNC input level, the same signal that starts the ETL ramp).
+            gate_src = bnc_addr(ah["camera_expose_bnc"])
+            gate_cells = tuple(ah.get("plc_laser_gate_cells", (8, 9, 11, 16)))
+            reserved = {ah.get("camera_trigger_cell", 10)}
+            if reserved & set(gate_cells):
+                raise ValueError(f"plc_laser_gate_cells {gate_cells} collide with camera_trigger_cell {reserved}")
+        self._lines = configure_laser_enable_lines(plc, laser_bncs=bncs, toggle_cells=cells,
+                                                   gate_source_addr=gate_src, gate_cells=gate_cells)
         logger.info(f"ASITiger_LaserEnabler: configured PLC BNCs {tuple(bncs)} for lasers "
-                    f"{self.laser_keys_sorted} (in that order).")
+                    f"{self.laser_keys_sorted} (in that order)"
+                    + (f", gated by camera Expose-Out (BNC {ah['camera_expose_bnc']}) via cells {gate_cells}."
+                       if gate_src is not None else "."))
 
     def enable(self, laser):
         """Enables a single laser line. All other lines are switched off
