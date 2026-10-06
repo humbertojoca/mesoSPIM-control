@@ -502,43 +502,31 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         """
         The ETL's SAM=2 waveform period, in ms.
 
-        REAL-HARDWARE FINDING (from the user, after switching the camera's
-        readout mode to "All Rows"): Expose-Out's duration now equals the
-        REAL configured exposure time exactly, no longer the shorter,
-        rolling-shutter-derived pulse documented earlier in this project
-        ("one confirmed data point showed a 150ms exposure setting
-        producing a ~120ms Expose-Out pulse" -- see
-        asi_tiger_galvo_etl_demo.py's --etl-period-ms help text, which
-        predates this readout-mode change and no longer reflects reality
-        under "All Rows"). With Expose-Out now spanning the FULL exposure,
-        the ETL sweep should track the real exposure time directly, not a
-        separately hand-tuned constant that silently drifts out of sync
-        whenever the exposure setting changes (including row to row, since
-        mesoSPIM allows exposure to vary by channel).
+        Camera Expose-Out must be in "Any Row" mode
+        (camera_parameters['exp_out_mode'] = 2) -- HARDWARE-CONFIRMED (log
+        e977f8da): Expose-Out rises ~8 ms after the trigger, i.e. at the
+        start of the rolling-shutter sweep, and stays high for ~exposure +
+        sweep (~380-418 ms at a 200 ms exposure). SAM=2 starts the ETL
+        ramp on that rising edge, so the ramp begins with the sweep. (An
+        earlier "All Rows" setting gave only a ~20 ms pulse near the END
+        of the exposure -- ETL started late; that was a mis-set config.)
 
-        Derives the period from self.state['camera_exposure_time'] (the
-        same key run_tasks() already uses for its own Expose-Out-low
-        timeout) MINUS a small safety margin
-        (asi_dac_parameters.get('etl_period_margin_ms', 0.0)) --
-        CONFIRMED ON REAL HARDWARE, separately, earlier in this project:
-        the ETL's period must be SHORTER than the camera's real trigger
-        interval, not equal to it -- SAM=2 must finish its cycle before
-        the next trigger edge arrives, or it misses every other trigger.
-        That finding was from the OLD rolling-shutter timing, where
-        Expose-Out was itself a separate, shorter, derived pulse with its
-        own jitter relative to the actual exposure window -- some margin
-        against IT made sense. Under "All Rows" (the mode now in use),
-        Expose-Out spans the exposure window directly and the camera's
-        own trigger-to-trigger interval already includes its readout
-        overhead beyond the exposure time itself, so there is no known
-        source of jitter left for a margin to protect against -- PER THE
-        USER, directly: "in reality, margin period is negligible if the
-        expose out is in 'all rows'". Default margin is therefore 0.0ms
-        (derived period = the real exposure time, exactly). The key is
-        left in place (not removed) as a manual escape hatch for a rack
-        or readout mode where some margin genuinely is still needed --
-        set asi_dac_parameters['etl_period_margin_ms'] explicitly if you
-        find one.
+        The period is derived from self.state['camera_exposure_time'] (the
+        same key run_tasks() uses for its Expose-Out-low timeout) minus
+        asi_dac_parameters.get('etl_period_margin_ms', 0.0), so it tracks
+        the exposure setting (which can vary row to row by channel) instead
+        of a hand-tuned constant. NOT the Expose-Out width: under Any Row
+        that is ~2x the exposure and would not match the ramp to the sweep.
+        Whether exposure-length (200 ms) actually matches the ~190 ms
+        sweep in the images is NOT yet bench-confirmed.
+
+        CONFIRMED ON REAL HARDWARE, earlier: the SAM=2 period must be
+        SHORTER than the camera's trigger interval, or the axis misses
+        every other trigger edge. With per-frame triggering the interval
+        is ~0.66 s at 200 ms exposure, far longer than the period, so the
+        default margin is 0.0 ms. The key stays as an escape hatch --
+        set asi_dac_parameters['etl_period_margin_ms'] if a rack or
+        readout mode needs it.
 
         asi_dac_parameters['etl_period_ms'], if explicitly set, OVERRIDES
         this derivation entirely (manual escape hatch, e.g. for a fixed
@@ -601,6 +589,19 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         side = _state_get(self.state, "shutterconfig", "Left")
         letter = "l" if side == "Left" else "r"
         other_letter = "r" if letter == "l" else "l"
+        # Stock mesoSPIM drives BOTH galvos with galvo_l_amplitude ("always use same
+        # amplitude for both galvos", mesoSPIM_WaveFormGenerator.create_galvo_waveforms);
+        # there is no 'galvo_r_amplitude' state key, so reading it returned the 0.0
+        # default and the Right galvo never scanned.
+        galvo_amp_key = "galvo_l_amplitude"
+
+        if not self._live_mode and self._plc is not None and ah.get("acq_track_plc_pointer", False):
+            # OPT-IN, outside live: skip repeated `M E=` pointer moves (~103 ms each) for
+            # this row/snap, until close_tasks() turns it off. Safe for the same reason as
+            # in live: only this PLCCard (shared with ASITiger_LaserEnabler) addresses the
+            # PLC axis; the stage driver's polling and Z/F moves use other axes.
+            self._plc.forget_pointer()
+            self._plc.track_pointer = True
 
         # Laser intensity: self.state['intensity'] is 0-100% (per mesoSPIM_Core.set_intensity()'s
         # own docstring), NOT a voltage -- convert using max_laser_voltage, already
@@ -644,7 +645,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             _state_get(self.state, f"etl_{letter}_ramp_rising_%", None),
             _state_get(self.state, f"etl_{letter}_ramp_falling_%", None),
             self._etl_period_ms(ah),
-            _state_get(self.state, f"galvo_{letter}_amplitude", 0.0),
+            _state_get(self.state, galvo_amp_key, 0.0),
             _state_get(self.state, f"galvo_{letter}_offset", 0.0),
             _state_get(self.state, f"galvo_{letter}_frequency", 100.0),
             _state_get(self.state, f"galvo_{letter}_duty_cycle", 0.5),
@@ -708,7 +709,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
 
         # --- Galvo: configure + start (free-running) the ACTIVE side only ---
         active_galvo = galvo_by_letter[letter]
-        galvo_amp = _state_get(self.state, f"galvo_{letter}_amplitude", 0.0)
+        galvo_amp = _state_get(self.state, galvo_amp_key, 0.0)
         galvo_off = _state_get(self.state, f"galvo_{letter}_offset", 0.0)
         galvo_freq = _state_get(self.state, f"galvo_{letter}_frequency", 100.0)
         galvo_duty = _state_get(self.state, f"galvo_{letter}_duty_cycle", 0.5)
@@ -783,6 +784,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         pulse_ms = ah.get("camera_trigger_pulse_ms", 10.0)
         expose_bit = 1 << (self._camera_expose_bnc - 1)
         t_run0 = time.perf_counter()
+        self._frame_logged = False
         self._frame_expose_high_wait_s = None
         self._frame_expose_high_width_s = None
         t_high_seen = None
@@ -838,12 +840,14 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
     def _check_expose_width(self, exposure_time_s):
         """One-time (per live session / backend instance) WARNING when the measured
         Expose-Out high time is far shorter than the exposure. Found on the user's
-        bench: with camera_parameters['exp_out_mode'] = 1 (All Rows) the scope showed
-        only a short pulse. PVCAM's All Rows signal is high for exactly the exposure
-        time, and this backend (a) starts the ETL on Expose-Out's rising edge and
-        (b) treats Expose-Out going low as 'exposure finished' (which also releases
-        the laser blanking), so a short pulse means the ETL sweep and the end-of-
-        exposure detection are not aligned with the real exposure."""
+        bench: with camera_parameters['exp_out_mode'] = 1 (All Rows) Expose-Out was
+        only ~20 ms wide, because All Rows is high only while EVERY row exposes
+        (~ exposure - sweep). The required mode is 2 (Any Row, ~ exposure + sweep;
+        hardware-confirmed, log e977f8da). This backend (a) starts the ETL on
+        Expose-Out's rising edge and (b) treats Expose-Out going low as 'exposure
+        finished' (which also releases the laser blanking), so a short pulse means
+        the ETL sweep and the end-of-exposure detection are not aligned with the
+        real exposure."""
         ah = self.cfg.asi_dac_parameters
         width = getattr(self, "_frame_expose_high_width_s", None)
         if width is None or getattr(self, "_expose_width_warned", False):
@@ -860,16 +864,19 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
                    f"with a long camera_parameters['scan_line_delay'] (ASLM) the sweep can take most of the "
                    f"exposure, leaving a short pulse near its END. The ETL sweep (started by Expose-Out's "
                    f"rising edge) and the end-of-exposure/laser-blanking timing then start late / end early. "
-                   f"For ASLM try exp_out_mode=2 (Any Row: high from the first row's start to the last row's end). "
+                   f"Set exp_out_mode=2 (Any Row: high from the first row's start to the last row's end; "
+                   f"the bench-confirmed setting for this backend). "
                    f"Shown once per live session; silence with asi_dac_parameters['expose_width_warn_fraction']=0.")
             logger.warning(msg)
             print(msg, flush=True)
 
     def stop_tasks(self):
-        """No-op for this design -- see start_tasks()'s docstring. The
-        ETL stays armed for the whole row; close_tasks() stops/zeros it
-        once, at the actual end."""
-        pass
+        """No hardware action -- see start_tasks()'s docstring. The ETL
+        stays armed for the whole row; close_tasks() stops/zeros it once,
+        at the actual end. Writes the per-frame timing line: stop_tasks()
+        runs once per frame on every path (snap/live and acquisition rows),
+        whereas close_tasks() runs only once per ROW in an acquisition."""
+        self._log_frame_timing()
 
     def _log_frame_timing(self):
         """One WARNING line per snap_image() cycle: how many serial
@@ -881,6 +888,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             return
         if self._tiger is None:
             return
+        self._frame_logged = True
         n, wire_s, max_s, max_cmd = self._tiger.take_stats()
         now = time.perf_counter()
         wall = now - getattr(self, "_frame_prev_t", now)
@@ -1075,7 +1083,13 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
                     self._dac.set_voltage(ch_name, 0.0)
             except Exception as exc:
                 logger.error(f"ASI Tiger DAC: error zeroing on close: {exc}")
-        self._log_frame_timing()
+        if self._plc is not None and not self._live_mode:
+            self._plc.track_pointer = False  # acq_track_plc_pointer is per row/snap only
+        if not getattr(self, "_frame_logged", False):
+            # Normally stop_tasks() already logged this frame; this covers a close
+            # with no frame since (e.g. a row stopped before its first plane). The
+            # close's own commands are otherwise counted in the next frame's line.
+            self._log_frame_timing()
         # Deliberately NOT disconnecting or nulling self._tiger/_plc/_dac/etc here
         # -- see this method's docstring ("REAL CALL FREQUENCY") for why. create_tasks()'s
         # existing `if self._tiger is not None: return` guard is what actually makes

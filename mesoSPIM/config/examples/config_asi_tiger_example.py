@@ -103,8 +103,11 @@ asi_dac_parameters = {
                                                  # of zeroing/re-setting it every frame; zeroed when live ends
     'live_track_plc_pointer': True,              # optional, default True -- LIVE ONLY: skip PLC `M E=` pointer moves
                                                  # that repeat the current position (~103 ms each on this rack)
+    'acq_track_plc_pointer': False,              # optional, default False (mock-tested, NOT yet hardware-confirmed) --
+                                                 # the same skip outside live: acquisition rows and single snaps.
+                                                 # Mock: ~4 -> ~2 pointer moves per plane (~200 ms/plane saved)
     'expose_width_warn_fraction': 0.5,           # optional, default 0.5: warn once per live session if Expose-Out is high for
-                                                 # less than this fraction of the exposure (All Rows should be ~= the exposure).
+                                                 # less than this fraction of the exposure (Any Row should be ~ exposure + sweep).
                                                  # 0 silences it. Only checked for exposures >= expose_width_check_min_exposure_s (0.1)
     'frame_timing_log': True,                    # optional, default True -- one timing line per frame (debugging)
     'camera_expose_poll_interval_s': 0.005,      # optional, default 0.005 (5 ms) -- delay between
@@ -137,20 +140,20 @@ asi_dac_parameters = {
     # adapter derives it automatically, every row, from the real camera
     # exposure time: self.state['camera_exposure_time']*1000 -
     # etl_period_margin_ms. This replaced an earlier flat guessed value
-    # (120.0ms) after the user switched the camera's readout mode to
-    # "All Rows", which made Expose-Out span the FULL configured exposure
-    # duration instead of a shorter rolling-shutter-derived pulse -- so
-    # the ETL sweep should track the real exposure time, not a constant.
-    # See mesoSPIM_ASITigerWaveFormGenerator._etl_period_ms() and
+    # (120.0ms), so the ETL sweep tracks the exposure setting, not a
+    # constant. Requires exp_out_mode=2 (Any Row): Expose-Out rises at the
+    # start of the rolling-shutter sweep, which is when SAM=2 starts the
+    # ramp. Whether exposure-length matches the real sweep in the images
+    # is not yet bench-confirmed. See
+    # mesoSPIM_ASITigerWaveFormGenerator._etl_period_ms() and
     # PATCHNOTES_ASI_TIGER.md for the full history.
     #
     # 'etl_period_ms': 120.0,     # uncomment to force a fixed period instead (bypasses auto-derivation)
     #
     # etl_period_margin_ms defaults to 0.0 (derived period = the real
-    # exposure time, exactly) -- per the user, directly: "in reality,
-    # margin period is negligible if the expose out is in 'all rows'",
-    # since under that readout mode Expose-Out spans the real exposure
-    # window with no known extra jitter to margin against. Left
+    # exposure time, exactly). With per-frame triggering the trigger
+    # interval (~0.66 s at 200 ms exposure) is far longer than the
+    # period, so no margin is needed. Left
     # commented out here since 0.0 is already the default; uncomment
     # and set a positive value only if your rack/readout mode is found
     # to still need some margin (the ETL's SAM=2 period must stay

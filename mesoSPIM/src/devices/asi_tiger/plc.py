@@ -172,6 +172,11 @@ class PLCCard:
         self._cell_state_cache.clear()
         self._ptr = None
 
+    def forget_pointer(self):
+        """Forget only the pointer position (keep the cell-state cache), so
+        the next _select() always sends its `M` move."""
+        self._ptr = None
+
     # ------------------------------------------------------------------
     # Pointer + raw cell/IO programming
     # ------------------------------------------------------------------

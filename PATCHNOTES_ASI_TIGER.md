@@ -4594,6 +4594,36 @@ pass.
 
 **Change:** the one-time width warning no longer claims a wrong camera mode; it explains the All Rows / line delay case and suggests Any Row.
 
+## 2026-10-06: Acquisition-row prep -- Right galvo amplitude bug, per-frame timing in rows, laser-enable trim, opt-in pointer tracking outside live (mock-tested, NOT yet hardware-confirmed)
+
+New mock harness (not in the repo): replays mesoSPIM_Core's exact acquisition-row call sequence (prepare_image_series, per-plane snap_image_in_series + Z move over the shared port, close_image_series, stop mid-row) and live -> acquisition, using the user's real `config_benchtop_ASI_2026.py`, the real TigerController / PLCCard / DAC / SingleAxisWaveform / ASITiger_LaserEnabler code, and a fake serial port that models the PLC pointer, the cell states and an Any Row Expose-Out window per trigger. The state mock only has `__getitem__`/`__setitem__` and raises KeyError like `mesoSPIM_StateSingleton`.
+
+**Bug (found by the mock, present since the galvo was added): the Right galvo was driven at 0 Vpp.** write_waveforms_to_tasks() read `galvo_r_amplitude`, but stock mesoSPIM has no such state key (it is commented out in mesoSPIM_State.py; mesoSPIM_WaveFormGenerator drives both galvos with `galvo_l_amplitude`, "always use same amplitude for both galvos"). `_state_get` returned the 0.0 default, so for every Right row and Right live the galvo was configured `SAA C=0` and only parked at its offset, so the light sheet did not scan. HEAD under the mock: `37SAA C=0`. Fixed: both sides use `galvo_l_amplitude` (raw, as stock); offsets, frequencies and duty cycles stay per side. **Check on hardware: the Right arm's sheet should now scan.** The earlier "left/right switching works" confirmation did not cover the right galvo's amplitude.
+
+**Per-frame timing line during acquisition rows.** `_log_frame_timing()` ran only in close_tasks(), which is once per ROW in an acquisition, so a whole stack showed as one line. It now runs in stop_tasks() (once per frame on every path). close_tasks() only logs if no frame was logged since the last run_tasks() (e.g. stop before the first plane). The close's own commands are counted in the next frame's line. Live lines are unchanged in practice (close_tasks() sends ~0 commands in live).
+
+**Laser-enable trim.** ASITiger_LaserEnabler.enable() called disable_all() before enabling, including the target line. Core calls enable() before the plane loop and again for plane 1 (and live: before the loop and every frame), so the already-on line went OFF then ON: 2 extra pointer moves (~200 ms) per row or live session, plus a short laser blink before the first frame. It now switches off only the OTHER lines (same "all other lines off" semantics as mesoSPIM_LaserEnabler).
+
+**New opt-in `acq_track_plc_pointer` (default False).** The live-only pointer tracking, now also for acquisition rows and single snaps: turned on in write_waveforms_to_tasks() (pointer forgotten first, cell cache kept), off in close_tasks(). Safe for the same reason as live: only this PLCCard (shared with the laser enabler) addresses the PLC axis E; the stage driver's slow polling and Z/F moves use X/Y/Z/T/V. Mock: pointer moves per plane ~4 -> ~2 (rows of 4/3/2 planes: 34/12/8 -> 23/7/5 including row setup), i.e. ~200 ms per plane on this rack. Every laser-ON write still lands on the correct cell in the pointer model.
+
+**Mock-verified for acquisition rows (3 rows: Left 488 / Right 561 / Left 638, 4/3/2 planes, tracking off and on):** one trigger and one Z step per plane; active-side ETL armed exactly once per row (SAM=2), inactive ETL and galvo stopped; laser DAC set once per row and zeroed at close; the correct laser cell switched on once per plane and off after; all PLC cells low at the end; tracking off after each row and snap; stop mid-row stops the ETL/galvo and the next row does not run; live (Right) -> acquisition works with no leftover live state.
+
+**Blocker in the user's config (set to False on 2026-10-06 at the user's request, for testing; TTL motion is wanted later for faster acquisitions):** `config_benchtop_ASI_2026.py` has `asi_parameters['ttl_motion_enabled']: True`. Core then skips its per-plane `move_relative` and puts the ASI stage cards in TTL mode, so every plane of a stack would be taken at the same Z (config_check() already logs an ERROR about this). It must be False for this per-frame design before acquisition-row tests.
+
+Also: docstrings and example-config comments that still described Expose-Out under "All Rows" (`_etl_period_ms`, `_check_expose_width`, the etl_period / margin comments) were updated to the hardware-confirmed Any Row behaviour. Wording only, no behaviour change.
+
+## 2026-10-06: HARDWARE-CONFIRMED acquisition rows; stage x/f display swap fixed in the user's config (HARDWARE-CONFIRMED)
+
+**Hardware-confirmed (user):** acquisition rows work as intended with `ttl_motion_enabled: False`. Rows with different illumination arms and lasers switch correctly.
+
+**Bug reported:** with `stage_assignment {'x':'Y', 'f':'X', ...}` the GUI buttons moved the right stages, but the display showed focus and x swapped. Starting an acquisition with markers set in focus changed the focus.
+
+**Cause (stock `asicontrol.py`, not this backend):** moves send explicit letters (`M X=...`), so they were right. `read_position()` sends `W` with the axes in the dict's order (`W YXZTV`) and assigns the reply's numbers to those letters BY POSITION, while the controller answers in card order (X, Y, Z, T, V). So the real X (focus) was shown as mesoSPIM x and vice versa. Row markers are taken from that displayed position, so `f_abs` held the x value and the stage moved F there at the start of the row. The config comment already warned "The dictionary order is important here! Must match the ASI cards". The card-order reply is inferred from the symptom; the logs don't record raw replies.
+
+**Fix (config only):** `stage_assignment` reordered to `{'f':'X', 'x':'Y', 'z':'Z', 'theta':'T', 'y':'V'}`, so the ASI letters read X, Y, Z, T, V. The same mapping, only in card order. `encoder_conversion` is also matched by position and was already in X, Y, Z, T, V order. Nothing else uses the dict's order (only membership checks). Mock (real `StageControlASI`, fake port that answers `W` in card order): the old order reproduces the x/f swap, the new order shows every axis correctly.
+
+**HARDWARE-CONFIRMED (user, 2026-10-06):** after the reorder, the display and focus are correct (x and f shown correctly, focus no longer changes when an acquisition starts). Acquisition rows saved before this fix have x and f swapped in their markers and must be re-marked.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level. The only

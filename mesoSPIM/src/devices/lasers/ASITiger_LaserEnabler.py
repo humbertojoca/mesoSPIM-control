@@ -123,12 +123,18 @@ class ASITiger_LaserEnabler:
     def enable(self, laser):
         """Enables a single laser line. All other lines are switched off
         first (matches mesoSPIM_LaserEnabler's "all other lines are
-        switched off" semantics, though as two sequential PLC writes
-        here rather than one atomic NI multi-line write)."""
+        switched off" semantics, though as sequential PLC writes here
+        rather than one atomic NI multi-line write). The target line is
+        NOT switched off first: Core calls enable() before the plane loop
+        AND again for plane 1, and disable_all() here used to turn the
+        already-on line off and on again (2 extra ~103 ms pointer moves
+        per row, plus a short laser blink)."""
         if self._check_if_laser_in_laserdict(laser):
             self._ensure_lines()
             idx = self.laser_keys_sorted.index(laser)
-            self._lines.disable_all()
+            for i in range(len(self._lines.cells)):
+                if i != idx:
+                    self._lines.disable(i)
             self._lines.enable(idx)
             self.laserenablestate = laser
 
