@@ -31,11 +31,11 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 - Right galvo scans after the `galvo_r_amplitude` fix (2026-10-06).
 - `acq_track_plc_pointer` (2026-10-06): 25-plane row ~0.78 -> ~0.67 s per plane, 1.29 -> 1.49 fps. Laser blanking intact, all frames saved. Acquisition now matches live (~0.66 s per frame). One timing line per plane.
 - Hardware laser gating (`laser_gate_with_expose_out` + `laser_blanking = 'stack'`, on in the user's config; and2 cells 8/9/11/16 = enable AND Expose-Out). Live 0.66 -> 0.43-0.44 s per frame (~2.1 fps), acquisition 0.67 -> 0.44 s per plane (2.08 fps). Per frame is now ~Expose-Out window (~0.39 s) + ~40 ms.
-- TTL Z (2026-10-06, `stage_ttl_bnc: 1`, `ttl_motion_enabled`, `ttl_cards: (2,)`, `ttl_axis_masks: {2: 1}`): 31 frames -> +310 um, +10 um per frame. Frame time unchanged (~0.44 s). Each TTL step CORRUPTS a serial reply in flight (garbled bytes, ~1 per 2 frames); the Expose-Out poll now retries (returns None, never 0), the stage driver's poll just fails once.
+- TTL Z (2026-10-06, `stage_ttl_bnc: 1`, `ttl_motion_enabled`, `ttl_cards: (2,)`, `ttl_axis_masks: {2: 1}`): 31 frames -> +310 um, +10 um per frame = the set step; theta and F unchanged (user). Frame time unchanged (~0.44 s). Each TTL step CORRUPTS a serial reply in flight (garbled bytes, ~1 per 2 frames); the Expose-Out poll now retries (returns None, never 0), the stage driver's poll just fails once.
 - Display skipping frames during acquisition is stock mesoSPIM (`camera_display_temporal_subsampling`, default 2), not a bug.
 
 ## Mock-only, still waiting for hardware confirmation
-- TTL Z extras: theta/F unchanged after a row, a second step size, multi-row, images.
+- TTL Z extras: a second step size, multi-row, and images of a real sample (none available on 2026-10-06).
 - Laser gating: optional scope check of laser BNC vs. Expose-Out (laser change during live is confirmed, log 20261006-150530).
 - Slow stage-position polling during live (Core patch needs re-applying).
 - ETL raw amplitude, ramp direction and limits, and the `PR` range query logging.

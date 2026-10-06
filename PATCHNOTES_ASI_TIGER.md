@@ -4686,7 +4686,7 @@ Display skipping frames during acquisition (user report) is stock mesoSPIM: meso
 
 **Finding -- the replies are CORRUPTED, not just empty:** at each TTL step the Tiger's serial output glitches: `RDADC X?` replies like `'36�'`, `'?2'`, `'3v'`, `'-'`, empty; and the stage driver's own `W XYZTV` poll failed on a `0x8c` byte and once returned 4 of 5 positions. About one bad reply every other frame, always in the "wait for low" phase. Handled: the poll retries, no frame ended early (high 386-407 ms), the stage poll just retries next second. Why it is safe for frame timing: the glitch is time-locked to Expose-Out's real falling edge (that is what triggers the step), so even a corrupted reply that parsed as "low" could end a frame at most one poll (~10 ms) early. Still open: whether a serial COMMAND (not a query) issued at that instant could be corrupted -- during a TTL row only polls are sent, so not a current risk.
 
-Not yet checked: theta and F unchanged after a row; images; a second step size; multi-row.
+User-confirmed: the row's Z step was 10 um (matches exactly), and theta and F did not move. Not checked: images (no sample available; Z motion itself is confirmed), a second step size, multi-row.
 
 ## Rollback
 
