@@ -14,7 +14,7 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 ## Design
 - **Per-frame triggering.** Each `run_tasks()` fires one camera trigger through a PLC cell (BNC 4), then polls the camera's Expose-Out (PLC BNC 3) for high and then low. mesoSPIM's own loop steps Z/F, so `ttl_motion_enabled` must be False.
 - **Live mode.** Core calls `begin_live()` and `end_live()` around the live loop. The ETL and galvo keep running between frames and are re-armed only when an `arm_key` of side, ETL amplitude, offset, ramp percentages, period, or galvo amplitude, offset, frequency or duty changes. The laser DAC is held between frames. `live_hold_laser_dac` defaults to True, and the DAC is zeroed at `end_live` or when the laser line changes.
-- **PLC pointer.** Every `CCA F=` write needs a preceding `M E=<cell>` pointer move, about 103 ms each on this rack. Cell states are cached. Pointer tracking (`track_pointer`) is on in live (`live_track_plc_pointer`, default True) and opt-in for acquisition rows and snaps (`acq_track_plc_pointer`, default False, mock-only).
+- **PLC pointer.** Every `CCA F=` write needs a preceding `M E=<cell>` pointer move, about 103 ms each on this rack. Cell states are cached. Pointer tracking (`track_pointer`) is on in live (`live_track_plc_pointer`) and in acquisition rows and snaps (`acq_track_plc_pointer`). Both default True and both are hardware-confirmed.
 - **Laser blanking.** PLC enable lines (cells 12–15, BNCs 5–8). `enable()` switches off only the other lines, so the target line is not blinked off and on.
 - **Galvo amplitude.** Both sides use `galvo_l_amplitude`, as stock mesoSPIM does. There is no `galvo_r_amplitude` state key. Offset, frequency and duty are per side.
 - **Frame timing log.** One line per frame, written from `stop_tasks()` (in acquisition `close_tasks()` runs once per row).
@@ -28,10 +28,11 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 - Frame time at 200 ms exposure is about 0.66 s with Any Row. This is mostly physical, not overhead.
 - Acquisition rows (2026-10-06, `ttl_motion_enabled: False`): rows with different illumination arms and lasers switch correctly.
 - Stage x/f display and focus fixed by putting `stage_assignment` in card order (2026-10-06).
+- Right galvo scans after the `galvo_r_amplitude` fix (2026-10-06).
+- `acq_track_plc_pointer` (2026-10-06): 25-plane row ~0.78 -> ~0.67 s per plane, 1.29 -> 1.49 fps. Laser blanking intact, all frames saved. Acquisition now matches live (~0.66 s per frame). One timing line per plane.
+- Display skipping frames during acquisition is stock mesoSPIM (`camera_display_temporal_subsampling`, default 2), not a bug.
 
 ## Mock-only, still waiting for hardware confirmation
-- Right galvo now scans (it was driven at 0 Vpp before 2026-10-06, a `galvo_r_amplitude` bug).
-- Optional `acq_track_plc_pointer` for acquisition rows.
 - Slow stage-position polling during live (Core patch needs re-applying).
 - ETL raw amplitude, ramp direction and limits, and the `PR` range query logging.
 - Whether the ETL ramp period (200 ms) matches the roughly 190 ms sweep in the actual images.

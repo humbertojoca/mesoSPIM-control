@@ -4614,7 +4614,7 @@ Also: docstrings and example-config comments that still described Expose-Out und
 
 ## 2026-10-06: HARDWARE-CONFIRMED acquisition rows; stage x/f display swap fixed in the user's config (HARDWARE-CONFIRMED)
 
-**Hardware-confirmed (user):** acquisition rows work as intended with `ttl_motion_enabled: False`. Rows with different illumination arms and lasers switch correctly.
+**Hardware-confirmed (user):** acquisition rows work as intended with `ttl_motion_enabled: False`. Rows with different illumination arms and lasers switch correctly. The Right galvo now scans as intended (the `galvo_r_amplitude` fix above).
 
 **Bug reported:** with `stage_assignment {'x':'Y', 'f':'X', ...}` the GUI buttons moved the right stages, but the display showed focus and x swapped. Starting an acquisition with markers set in focus changed the focus.
 
@@ -4623,6 +4623,21 @@ Also: docstrings and example-config comments that still described Expose-Out und
 **Fix (config only):** `stage_assignment` reordered to `{'f':'X', 'x':'Y', 'z':'Z', 'theta':'T', 'y':'V'}`, so the ASI letters read X, Y, Z, T, V. The same mapping, only in card order. `encoder_conversion` is also matched by position and was already in X, Y, Z, T, V order. Nothing else uses the dict's order (only membership checks). Mock (real `StageControlASI`, fake port that answers `W` in card order): the old order reproduces the x/f swap, the new order shows every axis correctly.
 
 **HARDWARE-CONFIRMED (user, 2026-10-06):** after the reorder, the display and focus are correct (x and f shown correctly, focus no longer changes when an acquisition starts). Acquisition rows saved before this fix have x and f swapped in their markers and must be re-marked.
+
+## 2026-10-06: HARDWARE-CONFIRMED `acq_track_plc_pointer`, now default True
+
+Logs 20261006-124314 (False) and 20261006-124524 (True), 25-plane single-row acquisition, 488 nm Left, 200 ms exposure:
+- Time per plane: 0.76-0.80 s -> 0.65-0.70 s (~0.12 s, ~15%). Camera frame rate 1.29 -> 1.49 fps. Acquisition now matches live (~0.66 s).
+- Serial wire time per plane: 0.62-0.65 s -> 0.48-0.50 s (about 1.5 of the ~103 ms pointer moves removed; the mock estimated 2). The command count goes UP (29-31 -> 35-37): those are cheap Expose-Out polls, since polling starts sooner.
+- User: laser blanking works, no dark frames, every frame saved.
+
+Also hardware-confirmed: one frame-timing line per plane during acquisition, and the laser-enable trim (the first plane of the row has no off/on blink).
+
+Default changed to True (code, example config). The live option `live_track_plc_pointer` is unchanged.
+
+Note on the Expose-Out width in the timing line: with tracking OFF it reads ~250-312 ms instead of ~390 ms. That is a measurement artifact: switching the trigger off costs an extra ~103 ms pointer move before polling starts, so Expose-Out has already been high ~100 ms at the first poll. "High after" and "high for" are measured from the start of polling, not from the trigger.
+
+Display skipping frames during acquisition (user report) is stock mesoSPIM: mesoSPIM_Camera.add_images_to_series() shows only every `camera_display_temporal_subsampling`-th frame (default 2; set it in `startup`). All frames are saved.
 
 ## Rollback
 

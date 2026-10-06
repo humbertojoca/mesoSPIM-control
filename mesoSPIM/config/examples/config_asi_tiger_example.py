@@ -103,9 +103,9 @@ asi_dac_parameters = {
                                                  # of zeroing/re-setting it every frame; zeroed when live ends
     'live_track_plc_pointer': True,              # optional, default True -- LIVE ONLY: skip PLC `M E=` pointer moves
                                                  # that repeat the current position (~103 ms each on this rack)
-    'acq_track_plc_pointer': False,              # optional, default False (mock-tested, NOT yet hardware-confirmed) --
-                                                 # the same skip outside live: acquisition rows and single snaps.
-                                                 # Mock: ~4 -> ~2 pointer moves per plane (~200 ms/plane saved)
+    'acq_track_plc_pointer': True,               # optional, default True -- the same skip outside live: acquisition
+                                                 # rows and single snaps. Hardware-confirmed: ~0.78 -> ~0.67 s per
+                                                 # plane at 200 ms exposure, laser blanking intact
     'expose_width_warn_fraction': 0.5,           # optional, default 0.5: warn once per live session if Expose-Out is high for
                                                  # less than this fraction of the exposure (Any Row should be ~ exposure + sweep).
                                                  # 0 silences it. Only checked for exposures >= expose_width_check_min_exposure_s (0.1)

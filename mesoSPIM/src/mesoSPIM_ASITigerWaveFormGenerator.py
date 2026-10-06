@@ -595,8 +595,9 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         # default and the Right galvo never scanned.
         galvo_amp_key = "galvo_l_amplitude"
 
-        if not self._live_mode and self._plc is not None and ah.get("acq_track_plc_pointer", False):
-            # OPT-IN, outside live: skip repeated `M E=` pointer moves (~103 ms each) for
+        if not self._live_mode and self._plc is not None and ah.get("acq_track_plc_pointer", True):
+            # Outside live (default ON, hardware-confirmed 2026-10-06: 25-plane row 0.78 -> 0.67 s
+            # per plane, laser blanking intact): skip repeated `M E=` pointer moves (~103 ms each) for
             # this row/snap, until close_tasks() turns it off. Safe for the same reason as
             # in live: only this PLCCard (shared with ASITiger_LaserEnabler) addresses the
             # PLC axis; the stage driver's polling and Z/F moves use other axes.
