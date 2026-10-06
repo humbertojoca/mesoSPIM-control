@@ -37,7 +37,8 @@ class StageControlASI(QtCore.QObject):
         self.axes = ''.join(self.axis_list) # String containing all axes
         self.num_axes = len(self.axes) # The number of axes
         self.encoder_conversion = asi_parameters['encoder_conversion']
-        
+        self.ttl_axis_masks = dict(asi_parameters.get('ttl_axis_masks') or {})  # {card: RM Y mask}, see enable_ttl_mode()
+
         self.position_dict = {axis : None for axis in self.axis_list} # create an empty position dict
         self.asi_connection = serial.Serial(self.port, self.baudrate, parity=serial.PARITY_NONE, timeout=5, xonxoff=False, stopbits=serial.STOPBITS_ONE)
         # Guards every read/write on self.asi_connection. Added after a
@@ -230,7 +231,11 @@ class StageControlASI(QtCore.QObject):
                     # For now, assume 2 axes per card. Set both axes on each card to move with TTL (RM Y=3)
                     # Relative movements prior to turning on TTL determines which axes move in response to pulse
                     # Set TTL for 1st and 2nd axis movement - override stored value (will reset with power cycle)
-                    command_string = str(i) + ' RM Y=3\r'
+                    # Optional asi_parameters['ttl_axis_masks'] = {card: mask} restricts it (e.g. {2: 1} = only
+                    # the first axis, Z, on card 2), so a stale relative move on the other axis (theta) is
+                    # not repeated on every TTL pulse. Default stays RM Y=3.
+                    mask = self.ttl_axis_masks.get(i, 3)
+                    command_string = str(i) + f' RM Y={mask}\r'
                     self._send_command(command_string.encode('ascii'))
                     # Enable TTL for relative movement
                     command_string = str(i) + ' TTL X=2 Y=2\r'

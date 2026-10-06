@@ -106,6 +106,12 @@ asi_dac_parameters = {
     'acq_track_plc_pointer': True,               # optional, default True -- the same skip outside live: acquisition
                                                  # rows and single snaps. Hardware-confirmed: ~0.78 -> ~0.67 s per
                                                  # plane at 200 ms exposure, laser blanking intact
+    'stage_ttl_bnc': None,                       # optional (mock-tested, NOT yet hardware-confirmed): PLC BNC wired to the
+                                                 # stage card's TTL IN0. With asi_parameters['ttl_motion_enabled'] True it
+                                                 # pulses on every Expose-Out falling edge and stock Core's TTL motion steps
+                                                 # Z (repeat-last-relative-move, TTL X=2) instead of a serial move per plane.
+                                                 # Pair with asi_parameters 'ttl_cards' = only the wired card(s), and
+                                                 # 'ttl_axis_masks' = {card: mask} (e.g. {2: 1} = Z only, not theta).
     'laser_gate_with_expose_out': False,         # optional, default False (mock-tested, NOT yet hardware-confirmed):
                                                  # each laser BNC = its enable cell AND camera Expose-Out, in the PLC,
                                                  # so lasers are blanked by the camera's own exposure window. Pair

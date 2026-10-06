@@ -4662,6 +4662,32 @@ Display skipping frames during acquisition (user report) is stock mesoSPIM: meso
 - Laser change DURING live (log 20261006-150530): 488 -> 561 nm at 15:06:12. The next frame shows the enable-line switch (53 commands, pointer moves `36M E=..`, run_tasks 0.53 s), then live returns to 0.43-0.44 s per frame. Left -> Right during live at 15:06:21: one reconfigure frame (0.69 s), then normal. The user kept live running through both changes.
 - Still optional: a scope check of laser BNC vs. Expose-Out BNC 3.
 
+## 2026-10-06: TTL Z stage motion (`stage_ttl_bnc`, HARDWARE-CONFIRMED: Z steps; see the end of this entry)
+
+**Expected gain is small:** after gating, a plane is ~0.44 s and the serial Z step + Core overhead ~10 ms (~2%). Done at the user's request as the step toward the autonomous loop.
+
+**Design:** reuse stock mesoSPIM's `ttl_motion_enabled` path unchanged in Core: prepare_acquisition() primes the step with a back-and-forth relative move, `enable_ttl_mode()` arms `RM Y=<mask>` + `TTL X=2 Y=2` (repeat the last relative move on each TTL IN0 pulse) on `ttl_cards`, run_acquisition() skips its per-plane `move_relative`, close_acquisition() disarms (`TTL X=0`). The backend only supplies the pulse: `create_tasks()` routes `falling_edge(Expose-Out)` (addr 227, a brief PLC pulse) to `asi_dac_parameters['stage_ttl_bnc']` as a push-pull output, only when `ttl_motion_enabled` is True. Same signal and wiring as the earlier HARDWARE-CONFIRMED Z sync test (BNC1 -> Z/T card IN0), but that test used the ring-buffer mode `TTL X=12`; **`TTL X=2` with this pulse is untested on hardware.** The stage steps after EVERY frame including the last (N steps per row), the same as the serial path; close_acquisition_list() then moves back to the start.
+
+**asicontrol.py (stock driver, patch reference regenerated):** new optional `asi_parameters['ttl_axis_masks'] = {card: RM Y mask}`. Stock sends `RM Y=3` (both axes on the card); for the Z/T card that also arms theta, which would repeat any stale relative theta move on every pulse. Default unchanged.
+
+**Per-row check logged:** with TTL armed, the backend reads Z (`W Z`, encoder_conversion) before the first trigger and after the row, and logs `ASI Tiger TTL Z: row of N frames moved Z a -> b um (+d um, +s um per frame)`. s should equal the row's Z step.
+
+**config_check:** `ttl_motion_enabled` without `stage_ttl_bnc` is an ERROR (Z would never move); with it, an INFO line.
+
+**Mock (`mock_ttl.py`; the fake rack steps Z at the end of each Expose-Out window only if BNC1 is really sourced from falling_edge(Expose-Out) and Core has TTL armed):** 8 planes -> 8 steps, the log line reads +40 um / +5 um per frame, no serial per-plane moves; without stage_ttl_bnc -> ERROR, Z unchanged; ttl off -> BNC1 untouched; snaps and live unaffected; asicontrol emits `2 RM Y=1` with the mask and `RM Y=3` without. Earlier suites still pass.
+
+**User config for testing:** `ttl_motion_enabled: True`, `ttl_cards: (2,)` (only the Z/T card is wired; F fixed per stack), `ttl_axis_masks: {2: 1}`, `stage_ttl_bnc: 1`. Revert: `ttl_motion_enabled: False`.
+
+**First hardware run (log 20261006-151618) CRASHED on frame 1:** `run_tasks()` -> `read_bnc_inputs()` -> `int(float(reply.split("=")[-1].split()[0]))` failed on an empty reply. Cause: with TTL armed, the stage card acts on the pulse at Expose-Out's falling edge -- exactly while `run_tasks()` polls `RDADC X?` for "low" -- and the Tiger answers the query in flight with a bare `:A` (the same effect seen earlier for WHERE under active triggering). The poll handler caught only timeouts, so the parse error escaped and killed the acquisition. **Fixed:** a failed poll (timeout, TigerError, ValueError, IndexError) now returns None and both waits simply poll again. It previously returned 0, which in the "wait for low" phase would read as "exposure finished" and end a frame early -- a latent bug for timeouts too. The Z read for the TTL log retries 3x. The frame timing line adds `| N bad poll replies` when any occurred. Mock: 2 bare replies after every TTL step -> all frames complete, none ends early (high ~0.41 s each), Z steps and the TTL log stay correct.
+
+**Hardware checks:** the TTL Z log line's per-frame step equals the set Z step for a few rows (different step sizes); images step through the sample; theta and F do not move; frame time unchanged or slightly lower.
+
+**HARDWARE-CONFIRMED (log 20261006-170305, single row, 31 planes):** `ASI Tiger TTL Z: row of 31 frames moved Z 0.0 -> 310.0 um (+10.00 um per frame)`; the stage poll at 17:04:24 independently read Z = 900 counts (90 um) ~9 frames in. So stock `TTL X=2` + `RM Y=1` on card 2 steps on the PLC falling-edge pulse, once per frame. Frame time 0.43-0.44 s (unchanged, as predicted).
+
+**Finding -- the replies are CORRUPTED, not just empty:** at each TTL step the Tiger's serial output glitches: `RDADC X?` replies like `'36�'`, `'?2'`, `'3v'`, `'-'`, empty; and the stage driver's own `W XYZTV` poll failed on a `0x8c` byte and once returned 4 of 5 positions. About one bad reply every other frame, always in the "wait for low" phase. Handled: the poll retries, no frame ended early (high 386-407 ms), the stage poll just retries next second. Why it is safe for frame timing: the glitch is time-locked to Expose-Out's real falling edge (that is what triggers the step), so even a corrupted reply that parsed as "low" could end a frame at most one poll (~10 ms) early. Still open: whether a serial COMMAND (not a query) issued at that instant could be corrupted -- during a TTL row only polls are sent, so not a current risk.
+
+Not yet checked: theta and F unchanged after a row; images; a second step size; multi-row.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level. The only

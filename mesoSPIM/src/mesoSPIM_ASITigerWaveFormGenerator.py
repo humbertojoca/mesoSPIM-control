@@ -209,10 +209,10 @@ import serial
 from .mesoSPIM_WaveFormGenerator import mesoSPIM_WaveFormGenerator
 
 from .devices.asi_tiger import (
-    TigerController, ASITigerDAC, PLCCard, SingleAxisWaveform,
+    TigerController, TigerError, ASITigerDAC, PLCCard, SingleAxisWaveform,
     PATTERN_SAWTOOTH, PATTERN_TRIANGLE, enable_backplane_trigger_mode,
     axis_slot_index, trigger_in_backplane_addr,
-    IO_TYPE_INPUT, IO_TYPE_PUSH_PULL_OUTPUT, cell_addr, bnc_addr,
+    IO_TYPE_INPUT, IO_TYPE_PUSH_PULL_OUTPUT, cell_addr, bnc_addr, falling_edge,
     configure_lr_switch,
 )
 
@@ -268,6 +268,8 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
 
         self._camera_trigger_cell = None
         self._camera_expose_bnc = None
+        self._stage_ttl_bnc = None   # PLC BNC pulsing the stage TTL input (create_tasks)
+        self._ttl_row = None         # per-row TTL Z travel log: {'z0': um or None, 'frames': n}
 
         super().__init__(parent)  # base __init__ calls self.config_check() at the end
 
@@ -326,14 +328,20 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             ttl_enabled_in_cfg = bool(self.cfg.asi_parameters.get("ttl_motion_enabled", False))
         except AttributeError:
             pass
-        if ttl_enabled_in_cfg:
+        if ttl_enabled_in_cfg and ah.get("stage_ttl_bnc") is None:
             logger.error(
-                "ASI Tiger backend (per-frame design): asi_parameters['ttl_motion_enabled'] is "
-                "True, but this design REQUIRES ttl_movement_enabled_during_acq to be False -- "
-                "it depends on mesoSPIM's own existing per-frame host-stepping loop for Z/F, "
-                "which that flag disables. Set ttl_motion_enabled to False, or this row's Z/F "
-                "position will not track the acquisition at all."
+                "ASI Tiger backend: asi_parameters['ttl_motion_enabled'] is True, so Core skips its "
+                "per-plane Z/F moves and expects TTL pulses on the stage cards, but "
+                "asi_dac_parameters['stage_ttl_bnc'] is not set -- nothing will pulse the stages "
+                "and every plane of a stack will be taken at the same Z. Set stage_ttl_bnc to the "
+                "PLC BNC wired to the stage card TTL input, or set ttl_motion_enabled to False."
             )
+        elif ttl_enabled_in_cfg:
+            logger.info(
+                f"ASI Tiger backend: TTL stage motion -- PLC BNC {ah['stage_ttl_bnc']} pulses the "
+                f"stage card(s) {self.cfg.asi_parameters.get('ttl_cards')} at each Expose-Out "
+                f"falling edge; Core skips its per-plane moves. Only axes on cards wired to that "
+                f"BNC step (focus interpolation needs the F card wired too).")
 
         gated = bool(ah.get("laser_gate_with_expose_out", False))
         blanking = getattr(self.cfg, "laser_blanking", "images")
@@ -352,8 +360,9 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         logger.warning(
             "ASI Tiger backend: true per-frame triggering (see this module's ARCHITECTURE "
             "NOTE) -- each run_tasks() call fires one camera trigger and waits for that one "
-            "exposure. Z/F stepping is handled entirely by mesoSPIM's existing stage driver, "
-            "not this file -- requires ttl_motion_enabled=False in asi_parameters."
+            "exposure. Z/F stepping is mesoSPIM's own: per-plane serial moves "
+            "(ttl_motion_enabled=False) or TTL stage motion pulsed from this backend's "
+            "stage_ttl_bnc (ttl_motion_enabled=True)."
         )
 
     # ------------------------------------------------------------------
@@ -512,6 +521,43 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             etl_trigger_addr = trigger_in_backplane_addr(etl_slot)
             self._plc.configure_io(etl_trigger_addr, IO_TYPE_PUSH_PULL_OUTPUT, source_addr=expose_addr)
 
+        # TTL stage motion (stock mesoSPIM ttl_motion_enabled path): pulse the stage card's
+        # TTL input on Expose-Out's FALLING edge, i.e. at the end of every exposure. A brief
+        # PLC edge pulse, not a level -- HARDWARE-CONFIRMED earlier for the Z card's IN0
+        # (a sustained level double-stepped; see PATCHNOTES "Z needs a brief pulse").
+        # The card only acts on it while Core has TTL motion armed (acquisition rows).
+        self._stage_ttl_bnc = self._stage_ttl_bnc_from_cfg()
+        if self._stage_ttl_bnc is not None:
+            self._plc.configure_io(bnc_addr(self._stage_ttl_bnc), IO_TYPE_PUSH_PULL_OUTPUT,
+                                   source_addr=falling_edge(expose_addr))
+            logger.info(f"ASI Tiger: stage TTL pulse on PLC BNC {self._stage_ttl_bnc} at each "
+                        f"Expose-Out falling edge (ttl_motion_enabled).")
+
+    def _stage_ttl_bnc_from_cfg(self):
+        """asi_dac_parameters['stage_ttl_bnc'] if asi_parameters['ttl_motion_enabled'], else None."""
+        try:
+            ttl_on = bool(self.cfg.asi_parameters.get("ttl_motion_enabled", False))
+        except AttributeError:
+            ttl_on = False
+        bnc = self.cfg.asi_dac_parameters.get("stage_ttl_bnc")
+        return bnc if (ttl_on and bnc is not None) else None
+
+    def _read_stage_z_um(self):
+        """One `W <Z letter>` query on the shared port, in um (asi_parameters encoder_conversion).
+        Used only to log the per-row TTL Z travel. Returns None on any failure."""
+        ap = self.cfg.asi_parameters
+        exc = None
+        for _ in range(3):  # a bare ':A' reply is possible while TTL is armed -- retry
+            try:
+                letter = ap["stage_assignment"]["z"]
+                reply = self._tiger.send_command(f"W {letter}")
+                return int(float(reply.split()[-1])) / float(ap["encoder_conversion"][letter])
+            except Exception as e:
+                exc = e
+                time.sleep(0.05)
+        logger.warning(f"ASI Tiger: could not read Z for the TTL log ({exc})")
+        return None
+
     def _etl_period_ms(self, ah) -> float:
         """
         The ETL's SAM=2 waveform period, in ms.
@@ -608,6 +654,11 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         # there is no 'galvo_r_amplitude' state key, so reading it returned the 0.0
         # default and the Right galvo never scanned.
         galvo_amp_key = "galvo_l_amplitude"
+
+        self._ttl_row = None
+        if (not self._live_mode and self._stage_ttl_bnc is not None
+                and _state_get(self.state, "ttl_movement_enabled_during_acq", False)):
+            self._ttl_row = {"z0": None, "frames": 0}  # Z read at the first frame (stage settled)
 
         if not self._live_mode and self._plc is not None and ah.get("acq_track_plc_pointer", True):
             # Outside live (default ON, hardware-confirmed 2026-10-06: 25-plane row 0.78 -> 0.67 s
@@ -809,31 +860,44 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         expose_bit = 1 << (self._camera_expose_bnc - 1)
         t_run0 = time.perf_counter()
         self._frame_logged = False
+        self._frame_bad_polls = 0
         self._frame_expose_high_wait_s = None
         self._frame_expose_high_width_s = None
         t_high_seen = None
         poll_interval_s = ah.get("camera_expose_poll_interval_s", 0.005)
+
+        if self._ttl_row is not None:
+            if self._ttl_row["frames"] == 0:
+                self._ttl_row["z0"] = self._read_stage_z_um()
+            self._ttl_row["frames"] += 1
 
         self._plc.set_cell_state(self._camera_trigger_cell, True)
         time.sleep(pulse_ms / 1000.0)
         self._plc.set_cell_state(self._camera_trigger_cell, False)
 
         def _poll_expose_bit():
-            """read_bnc_inputs(), swallowing a single timed-out/garbled
-            round-trip so one bad poll doesn't abort the whole frame --
-            the surrounding while-loop's own timeout is still what
-            decides when to give up for real."""
+            """read_bnc_inputs(), or None for a failed/garbled round-trip, so one bad
+            poll doesn't abort the frame; the caller just polls again and its own
+            timeout decides when to give up.
+
+            None, NOT 0: 0 would read as "Expose-Out low" and end the frame early.
+            REAL-HARDWARE FINDING (TTL Z, 2026-10-06): when the stage card acts on a
+            TTL pulse -- which arrives at Expose-Out's falling edge, i.e. while this
+            loop is polling -- the Tiger can answer a query in flight with a bare ':A'
+            (no data), the same thing seen earlier for WHERE under active triggering.
+            The unparseable reply raised out of run_tasks() and killed the acquisition."""
             try:
                 return self._plc.read_bnc_inputs()
-            except (TimeoutError, serial.SerialTimeoutException) as exc:
-                logger.error(f"ASI Tiger: read_bnc_inputs() poll failed ({exc}) -- "
-                              f"retrying until this phase's own timeout.")
-                return 0
+            except (TimeoutError, serial.SerialTimeoutException, TigerError, ValueError, IndexError) as exc:
+                self._frame_bad_polls = getattr(self, "_frame_bad_polls", 0) + 1
+                logger.warning(f"ASI Tiger: Expose-Out poll failed ({type(exc).__name__}: {exc}) -- polling again.")
+                return None
 
         start_timeout_s = ah.get("camera_expose_start_timeout_s", 2.0)
         start = time.perf_counter()
         while time.perf_counter() - start < start_timeout_s:
-            if _poll_expose_bit() & expose_bit:
+            bits = _poll_expose_bit()
+            if bits is not None and bits & expose_bit:
                 t_high_seen = time.perf_counter()
                 self._frame_expose_high_wait_s = t_high_seen - start
                 break
@@ -847,7 +911,8 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         end_timeout_s = ah.get("camera_expose_end_timeout_margin_s", 2.0) + exposure_time_s
         start = time.perf_counter()
         while time.perf_counter() - start < end_timeout_s:
-            if not (_poll_expose_bit() & expose_bit):
+            bits = _poll_expose_bit()
+            if bits is not None and not (bits & expose_bit):
                 t_low_seen = time.perf_counter()
                 self._frame_run_tasks_s = t_low_seen - t_run0
                 if t_high_seen is not None:
@@ -927,6 +992,7 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
             f"{wire_s:.2f}s on wire (avg {1000*wire_s/max(n,1):.0f} ms, slowest "
             f"{max_s*1000:.0f} ms = {max_cmd!r}) | run_tasks {getattr(self, '_frame_run_tasks_s', 0.0):.2f}s, "
             f"Expose-Out high after: {hw_txt}"
+            + (f" | {self._frame_bad_polls} bad poll replies" if getattr(self, "_frame_bad_polls", 0) else "")
         )
         logger.warning(msg)  # goes to mesoSPIM's log file (see mesoSPIM/log/)
         print(msg, flush=True)  # and the console, since mesoSPIM logs to a file only
@@ -1107,6 +1173,18 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
                     self._dac.set_voltage(ch_name, 0.0)
             except Exception as exc:
                 logger.error(f"ASI Tiger DAC: error zeroing on close: {exc}")
+        if self._ttl_row is not None and self._ttl_row["z0"] is not None:
+            # The stage steps on each Expose-Out falling edge, i.e. after EVERY frame,
+            # including the last: expect (z1 - z0) == frames x Z step.
+            z0, n = self._ttl_row["z0"], self._ttl_row["frames"]
+            time.sleep(0.05)  # let the last TTL step finish
+            z1 = self._read_stage_z_um()
+            if z1 is not None:
+                msg = (f"ASI Tiger TTL Z: row of {n} frames moved Z {z0:.1f} -> {z1:.1f} um "
+                       f"({z1 - z0:+.1f} um, {(z1 - z0) / n:+.2f} um per frame) -- compare with the row's Z step")
+                logger.warning(msg)
+                print(msg, flush=True)
+        self._ttl_row = None
         if self._plc is not None and not self._live_mode:
             self._plc.track_pointer = False  # acq_track_plc_pointer is per row/snap only
         if not getattr(self, "_frame_logged", False):
