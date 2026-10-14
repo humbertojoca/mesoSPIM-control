@@ -1039,9 +1039,9 @@ class mesoSPIM_ASITigerWaveFormGenerator(mesoSPIM_WaveFormGenerator):
         """One WARNING line per snap_image() cycle: how many serial
         commands it took, how long they spent on the wire, the slowest one,
         and how long run_tasks() waited for Expose-Out. Exists to show where
-        a slow live() frame really goes. Silence with
-        asi_dac_parameters['frame_timing_log'] = False."""
-        if not self.cfg.asi_dac_parameters.get("frame_timing_log", True):
+        a slow live() frame really goes. Off by default (since 2026-10-14);
+        turn on with asi_dac_parameters['frame_timing_log'] = True."""
+        if not self.cfg.asi_dac_parameters.get("frame_timing_log", False):
             return
         if self._tiger is None:
             return

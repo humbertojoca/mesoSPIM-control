@@ -133,7 +133,8 @@ asi_dac_parameters = {
     'expose_width_warn_fraction': 0.5,           # optional, default 0.5: warn once per live session if Expose-Out is high for
                                                  # less than this fraction of the exposure (Any Row should be ~ exposure + sweep).
                                                  # 0 silences it. Only checked for exposures >= expose_width_check_min_exposure_s (0.1)
-    'frame_timing_log': True,                    # optional, default True -- one timing line per frame (debugging)
+    'frame_timing_log': False,                   # optional, default False -- True prints one timing line per frame
+                                                 # (serial cmd count/time, slowest cmd, Expose-Out wait) for troubleshooting
     'camera_expose_poll_interval_s': 0.005,      # optional, default 0.005 (5 ms) -- delay between
                                                  # Expose-Out polls in run_tasks(); each poll is a
                                                  # full serial round-trip on the shared port, so

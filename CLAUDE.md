@@ -27,7 +27,7 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 - **PLC pointer.** Every `CCA F=` write needs a preceding `M E=<cell>` pointer move, about 103 ms each on this rack. Cell states are cached. Pointer tracking (`track_pointer`) is on in live (`live_track_plc_pointer`) and in acquisition rows and snaps (`acq_track_plc_pointer`). Both default True and both are hardware-confirmed.
 - **Laser blanking.** PLC enable lines (cells 12–15, BNCs 5–8). `enable()` switches off only the other lines, so the target line is not blinked off and on.
 - **Galvo amplitude.** Both sides use `galvo_l_amplitude`, as stock mesoSPIM does. There is no `galvo_r_amplitude` state key. Offset, frequency and duty are per side.
-- **Frame timing log.** One line per frame, written from `stop_tasks()` (in acquisition `close_tasks()` runs once per row).
+- **Frame timing log.** Off by default since 2026-10-14 (`frame_timing_log: True` turns it on). One line per frame, written from `stop_tasks()` (in acquisition `close_tasks()` runs once per row).
 - **ETL.** SAM=2 re-arms on every rising edge of Expose-Out (hardware-confirmed). mesoSPIM's ETL amplitude is half peak-to-peak, while Tiger SAA is total peak-to-peak. The ETL driver (Optotune EL-E-4i) is the real voltage limit. The DAC range of 0–4.096 V is fine, and the min/max guard is opt-in (`etl_min_volts`, `etl_max_volts`). A negative SAA reverses the ramp direction, but that geometry is not bench-confirmed.
 - **Shared serial port.** The stage driver and this backend share one serial connection. A `serial_lock` in `asicontrol.py` serializes them.
 - **Stage position during live and acquisition.** Slow polling through the Core patch (`stage_poll_interval_ms_during_run`, default 1000 ms), ASI_Tiger only.
@@ -60,7 +60,6 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 - The user is aligning lasers and setting galvo and ETL offsets and amplitudes now.
 - Acquisition-rows testing on hardware is next. The user's config has `ttl_motion_enabled: False` for this (set 2026-10-06 at the user's request).
 - **TTL motion (next after laser gating; the user chose "gating, then TTL Z").** With gating, a whole plane is ~0.44 s of which ~0.39 s is the Expose-Out window, and Z step + Core overhead is ~10 ms, so TTL Z alone is ~2%. Further speed has to come from the camera side (exposure, line delay/sweep). It matters as the step toward the autonomous loop. The current per-frame design needs `ttl_motion_enabled: False` (Core steps Z/F over serial each plane). Supporting TTL motion means driving the stage cards' TTL input from the PLC (for example from Expose-Out falling or the trigger cell) so Z steps in hardware, and letting Core skip `move_relative`. This touches the earlier zstack_chain and stage-TTL work. Not started.
-- Set `frame_timing_log` to False once troubleshooting is done.
 - Possible further per-frame trimming in live: the remaining laser DAC set and zero, and two pointer moves.
 
 ## Tools (`tools/`)

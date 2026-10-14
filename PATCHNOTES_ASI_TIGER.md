@@ -4741,6 +4741,10 @@ The option existed (mock-only, "reversed-ramp geometry not bench-confirmed") and
 
 **To confirm on hardware:** several long acquisitions (45-60+ min) without a crash.
 
+## 2026-10-14 (v0.9): `frame_timing_log` now defaults to False
+
+The per-frame `ASI Tiger frame timing:` line was a troubleshooting aid and defaulted to on, so configs without the key (including the user's) printed it every frame. Default is now False; set `asi_dac_parameters['frame_timing_log'] = True` to get it back. The key is listed (False) in the user's config and in the example config. Error lines, the Expose-Out width warning (`expose_width_warn_fraction`) and the per-row `ASI Tiger TTL Z` line are unchanged. Mock-checked by code reading only (one `.get()` default); trivial.
+
 ## Rollback
 
 This patch is purely additive at the mesoSPIM-control level. The only
