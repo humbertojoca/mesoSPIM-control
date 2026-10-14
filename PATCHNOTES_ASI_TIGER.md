@@ -4729,7 +4729,7 @@ mesoSPIM stores `galvo_*_duty_cycle` in **percent** (config/state 50; `utils/wav
 
 The option existed (mock-only, "reversed-ramp geometry not bench-confirmed") and was off, so BOTH arms ramped up. Both arms share one rolling direction but propagate opposite ways, so the Right ETL must ramp the opposite way. With the option on, a side whose ramp falling % > rising % (Right 5 / 85-90) gets a negative SAA (down ramp, same voltage window, offset unchanged). Mock (`mock_direction.py`): Left `SAA H=480`, Right `SAA J=-500`, live Left -> Right re-arms with the right sign. **Hardware (log 20261006-190703, Right, 20 ms ASLM, fluorescent solution):** `down ramp`, 2.586..3.086 V, 243 ms; user: the waist follows the slit, everything fine after fine-tuning. On in the user's config.
 
-## 2026-10-14 (v0.9): CRASH every ~20-40 min traced to our own hang dumper -- now off by default (needs long-run confirmation)
+## 2026-10-14 (v0.9): CRASH every ~20-40 min traced to our own hang dumper -- now removed (needs long-run confirmation)
 
 **Symptom (user):** mesoSPIM crashed during acquisitions roughly every 20-40 minutes (Windows access violation, then 12-18 s of Windows Error Reporting freeze; the freeze also produced "Expose-Out never went high/low" errors and odd serial reads that were NOT hardware problems).
 
@@ -4737,7 +4737,7 @@ The option existed (mock-only, "reversed-ramp geometry not bench-confirmed") and
 
 **Origin:** NOT stock mesoSPIM. We added the line to `mesoSPIM/mesoSPIM_Control.py` in v0.6 for the serial hang hunt and never removed it, so every run since carried it.
 
-**Fix:** the periodic dumper only starts if the environment variable `MESOSPIM_HANG_DUMP_S` is set (seconds), for a short deliberate hang hunt. Default: off. Crash-only dumps stay available via `python -X faulthandler`. Checked: without the variable no hang_dump.txt is written; with it the dumper runs as before.
+**Fix:** first made opt-in (env `MESOSPIM_HANG_DUMP_S`, commit e3d3eb0; superseded the same day). Then, at the user's request, removed completely: `mesoSPIM/mesoSPIM_Control.py` is back to stock (identical to base 98d74d35, including the `import faulthandler` we had added). The old `hang_dump.txt` files are untracked and gitignored. Crash-only tracebacks are still available by starting Python with `-X faulthandler` (no watchdog thread, nothing written unless the process actually crashes).
 
 **To confirm on hardware:** several long acquisitions (45-60+ min) without a crash.
 

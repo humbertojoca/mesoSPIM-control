@@ -40,4 +40,7 @@ docs/build_log.txt
 PROJECT_CONTEXT.md
 .claude/skills
 mesoSPIM/hang_dump.txt
+hang_dump.txt
 mesoSPIM/config/etl_parameters/ETL-parameters-benchtop.csv
+fault.txt
+mesoSPIM/fault.txt
