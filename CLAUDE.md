@@ -2,6 +2,9 @@
 
 Put this file at the root of your mesoSPIM-control fork as `CLAUDE.md`. It is a condensed state of the work so far. `PATCHNOTES_ASI_TIGER.md` has the full dated history.
 
+## Latest (2026-10-14)
+- Crashes every ~20-40 min of acquisition were caused by OUR periodic hang dumper (`faulthandler.dump_traceback_later(15, repeat=True)` in `mesoSPIM_Control.py`, added in v0.6). Now off by default; opt in with env `MESOSPIM_HANG_DUMP_S`. Needs several 45-60+ min clean runs to confirm.
+
 ## Where we left off (2026-10-06)
 - Branch `asitiger-v0.9` was created from v0.8 (pushed) as the working branch for the next round. v0.7 and v0.8 are pushed.
 - The user is doing physical alignment and building a structured phantom. Software testing resumes after that.
@@ -71,4 +74,5 @@ A Python library (`asi_tiger`, in `mesoSPIM/src/devices/asi_tiger/`) that drives
 - Wiring severed by a PLC reset. Wiring persists now.
 - The left/right switch DAC channel being zeroed. Only laser channels are zeroed.
 - Pausing stage polling for non-ASI backends. Only ASI_Tiger pauses now.
+- A periodic faulthandler traceback dumper left running in normal use. It crashes the process (it walks frames without the GIL). Only enable it via `MESOSPIM_HANG_DUMP_S` for short hang hunts.
 - `asi_parameters['stage_assignment']` order. The ASI letters must read in card order (X, Y, Z, T, V). Stock `read_position()` matches the `W` reply by position, so another order swaps the displayed axes and the saved row markers. The user's config is now `{'f':'X', 'x':'Y', 'z':'Z', 'theta':'T', 'y':'V'}` (2026-10-06).

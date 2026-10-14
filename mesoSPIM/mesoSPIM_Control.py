@@ -19,7 +19,17 @@ from PyQt5 import QtWidgets, QtCore
 import qdarkstyle
 
 import faulthandler
-faulthandler.dump_traceback_later(15, repeat=True, file=open("hang_dump.txt", "w"), exit=False)
+# Periodic all-thread traceback dumper (hang_dump.txt): OFF by default since 2026-10-14.
+# It was added for the ASI Tiger hang hunt (v0.6) and left on; its watchdog C thread walks
+# other threads' Python frames without the GIL, and on the benchtop PC it crashed the
+# process every ~20-40 min of acquisition (access violation in faulthandler_thread ->
+# _Py_DumpTracebackThreads -> dump_frame). Opt in only for a deliberate, short hang hunt:
+#   set MESOSPIM_HANG_DUMP_S=15
+# Real crashes are still caught by starting Python with `-X faulthandler`.
+_hang_dump_s = os.environ.get("MESOSPIM_HANG_DUMP_S")
+if _hang_dump_s:
+    faulthandler.dump_traceback_later(float(_hang_dump_s), repeat=True,
+                                      file=open("hang_dump.txt", "w"), exit=False)
 
 package_directory = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(
